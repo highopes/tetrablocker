@@ -1,0 +1,17 @@
+[Unit]
+Description=TetraBlocker - dynamic TracingPolicy generator from DNS events
+After=network.target tetragon-enterprise.service
+Wants=tetragon-enterprise.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /usr/local/bin/tetrablocker --config /etc/tetrablocker/tetrablocker.conf
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+

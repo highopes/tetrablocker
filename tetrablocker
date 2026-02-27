@@ -1,0 +1,1305 @@
+#!/usr/bin/env python3
+import argparse
+import hashlib
+import json
+import os
+import re
+import select
+import signal
+import subprocess
+import time
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Set, Tuple
+
+# -----------------------------
+# Common helpers
+# -----------------------------
+
+def now() -> float:
+    return time.time()
+
+def sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+def json_dumps_stable(obj: dict) -> str:
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+def sha256_json(obj: dict) -> str:
+    return sha256_hex(json_dumps_stable(obj).encode("utf-8"))
+
+def norm_domain(s: str) -> str:
+    s = (s or "").strip().lower()
+    if not s:
+        return ""
+    return s if s.endswith(".") else (s + ".")
+
+def valid_ip(ip: str) -> bool:
+    ip = (ip or "").strip()
+    if not ip:
+        return False
+    if ":" in ip:
+        return bool(re.match(r"^[0-9a-fA-F:]+$", ip))
+    return bool(re.match(r"^\d{1,3}(\.\d{1,3}){3}$", ip))
+
+def is_ipv6(ip: str) -> bool:
+    return ":" in ip
+
+def ip_to_cidr(ip: str) -> str:
+    ip = ip.strip()
+    if "/" in ip:
+        return ip
+    return f"{ip}/128" if is_ipv6(ip) else f"{ip}/32"
+
+def atomic_write(path: str, content: str, mode: int = 0o644) -> None:
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    tmp = os.path.join(d, f".{os.path.basename(path)}.tmp.{os.getpid()}")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(content)
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+def atomic_write_json(path: str, obj: dict, mode: int = 0o644) -> None:
+    atomic_write(path, json.dumps(obj, indent=2, sort_keys=True, ensure_ascii=True) + "\n", mode=mode)
+
+def safe_unlink(path: str) -> None:
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return
+
+def run_cmd(cmd: List[str], timeout: int = 30) -> Tuple[int, str, str]:
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        out, err = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        out, err = p.communicate()
+        return 124, out, err
+    return p.returncode, out, err
+
+# -----------------------------
+# Tetragon / tetra helpers
+# -----------------------------
+
+def tetra_delete_policy(cfg, name: str) -> None:
+    candidates = [
+        [cfg.tetra_bin] + cfg.tetra_args + ["tp", "delete", name],
+        [cfg.tetra_bin] + cfg.tetra_args + ["tp", "del", name],
+        [cfg.tetra_bin] + cfg.tetra_args + ["tracingpolicy", "delete", name],
+        [cfg.tetra_bin] + cfg.tetra_args + ["tracingpolicy", "del", name],
+        [cfg.tetra_bin] + cfg.tetra_args + ["tracingpolicy", "remove", name],
+    ]
+    for c in candidates:
+        rc, out, err = run_cmd(c, timeout=20)
+        if rc == 0:
+            return
+
+def tetra_add_policy(cfg, yaml_path: str) -> None:
+    candidates = [
+        [cfg.tetra_bin] + cfg.tetra_args + ["tp", "add", yaml_path],
+        [cfg.tetra_bin] + cfg.tetra_args + ["tracingpolicy", "add", yaml_path],
+    ]
+    last_err = ""
+    for c in candidates:
+        rc, out, err = run_cmd(c, timeout=60)
+        if rc == 0:
+            return
+        last_err = err.strip()
+    raise RuntimeError(f"policy add failed: {last_err}")
+
+def tetra_list_policies(cfg) -> List[str]:
+    cmd = [cfg.tetra_bin] + cfg.tetra_args + ["tracingpolicy", "list"]
+    rc, out, err = run_cmd(cmd, timeout=20)
+    if rc != 0:
+        return []
+    names: List[str] = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line or line.startswith("ID") or line.startswith("---"):
+            continue
+        parts = re.split(r"\s+", line)
+        if len(parts) >= 2:
+            names.append(parts[1])
+    return names
+
+def start_event_stream(cfg) -> subprocess.Popen:
+    cmd = [cfg.tetra_bin] + cfg.tetra_args + ["getevents", "--host"]
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+
+def dns_dump(cfg) -> str:
+    cmd1 = [cfg.tetra_bin] + cfg.tetra_args + ["debug", "dns", "dump"]
+    rc, out, err = run_cmd(cmd1, timeout=30)
+    if rc == 0 and out.strip():
+        return out
+    cmd2 = [cfg.tetra_bin] + cfg.tetra_args + ["debug", "dns"]
+    rc, out, err = run_cmd(cmd2, timeout=30)
+    if rc == 0 and out.strip():
+        return out
+    raise RuntimeError(f"dns dump failed rc={rc} err={err.strip()}")
+
+def parse_dns_dump(text: str) -> List[Tuple[str, str]]:
+    pairs: List[Tuple[str, str]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.lower().startswith("ip"):
+            continue
+        parts = re.split(r"\s+", line)
+        if len(parts) < 2:
+            continue
+        ip = parts[0].strip()
+        dom = norm_domain(parts[1].strip())
+        if valid_ip(ip) and dom:
+            pairs.append((ip, dom))
+    return pairs
+
+def prewarm_domain(domain: str) -> None:
+    d = domain[:-1] if domain.endswith(".") else domain
+    if not d:
+        return
+    run_cmd(["/usr/bin/getent", "ahosts", d], timeout=10)
+
+# -----------------------------
+# Base "rule" feature (existing)
+# -----------------------------
+
+@dataclass
+class Rule:
+    name: str
+    binary: str
+    domains: List[str]
+    action: str = "Sigkill"
+    protocol: str = "tcp"
+    ports: List[int] = field(default_factory=list)
+    ip_ttl_seconds: int = 900
+    max_ips: int = 256
+    apply_cooldown_seconds: int = 1
+
+    def norm_domains(self) -> List[str]:
+        return sorted({norm_domain(x) for x in self.domains if norm_domain(x)})
+
+    def spec_hash(self) -> str:
+        obj = {
+            "name": self.name,
+            "binary": self.binary,
+            "domains": self.norm_domains(),
+            "action": self.action,
+            "protocol": self.protocol,
+            "ports": sorted([int(x) for x in self.ports]),
+            "ip_ttl_seconds": int(self.ip_ttl_seconds),
+            "max_ips": int(self.max_ips),
+            "apply_cooldown_seconds": int(self.apply_cooldown_seconds),
+        }
+        return sha256_json(obj)
+
+@dataclass
+class RuleState:
+    name: str
+    spec_hash: str = ""
+    last_apply_ts: float = 0.0
+    last_yaml_hash: str = ""
+    ip_cache: Dict[str, float] = field(default_factory=dict)
+
+# -----------------------------
+# Allowlist models
+# -----------------------------
+
+@dataclass
+class ALItem:
+    binary: str
+    binary_operator: str
+    proto: str               # "tcp" or "udp"
+    port: int                # single port per item (learning produces per-port items)
+    domains: List[str] = field(default_factory=list)  # normalized domains
+    cidrs: List[str] = field(default_factory=list)    # /32 or /128 or cidr
+    updated_at: float = 0.0
+
+    def key(self) -> Tuple[str, str, str, int]:
+        return (self.binary_operator, self.binary, self.proto, self.port)
+
+def bin_pattern_to_operator(binary: str) -> Tuple[str, str]:
+    b = (binary or "").strip()
+    if b.endswith("/*"):
+        return ("Prefix", b[:-1])  # keep trailing "/"
+    if b.startswith("*"):
+        return ("Postfix", b[1:])
+    return ("In", b)
+
+def compress_ports_to_values(ports: List[int], max_values: int = 4) -> List[str]:
+    ps = sorted(set([int(x) for x in ports if int(x) > 0 and int(x) <= 65535]))
+    if not ps:
+        return []
+    # Compress contiguous ranges to "min:max"
+    ranges: List[Tuple[int, int]] = []
+    s = ps[0]
+    e = ps[0]
+    for p in ps[1:]:
+        if p == e + 1:
+            e = p
+        else:
+            ranges.append((s, e))
+            s = p
+            e = p
+    ranges.append((s, e))
+    vals: List[str] = []
+    for a, b in ranges:
+        vals.append(str(a) if a == b else f"{a}:{b}")
+    # If still too many, keep first max_values
+    return vals[:max_values]
+
+def chunk_list(xs: List[str], n: int) -> List[List[str]]:
+    out: List[List[str]] = []
+    cur: List[str] = []
+    for x in xs:
+        cur.append(x)
+        if len(cur) >= n:
+            out.append(cur)
+            cur = []
+    if cur:
+        out.append(cur)
+    return out
+
+# -----------------------------
+# Config
+# -----------------------------
+
+@dataclass
+class Config:
+    tetra_bin: str = "tetra"
+    tetra_args: List[str] = field(default_factory=list)
+    policy_dir: str = "/etc/tetragon/tetragon.tp.d"
+    state_dir: str = "/var/lib/tetrablocker"
+    config_reload_seconds: int = 60
+    dns_dump_min_interval_seconds: int = 1
+
+    reconcile_on_reload: bool = True
+    prewarm_on_start: bool = True
+    prewarm_on_reconcile: bool = True
+    dns_retry_attempts: int = 5
+    dns_retry_sleep_seconds: float = 0.2
+
+    # Allowlist
+    allowlist: bool = True
+    allowlist_file: str = "/etc/tetrablocker/allowlist.json"
+    allowlist_learning_seconds: int = 300
+    allowlist_policy_prefix: str = "tb-allowlist"
+    allowlist_action: str = "Sigkill"
+    allowlist_reload_seconds: int = 5
+    allowlist_addr_values_per_selector: int = 4
+    allowlist_port_values_per_selector: int = 4
+    allowlist_max_allow_selectors_per_policy: int = 4  # plus 1 deny selector => max 5 selectors/hook :contentReference[oaicite:4]{index=4}
+    allowlist_domain_refresh_seconds: int = 60
+    allowlist_domain_max_ips: int = 16
+
+    rules: List[Rule] = field(default_factory=list)
+
+def load_config(path: str) -> Config:
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+
+    cfg = Config()
+    cfg.tetra_bin = raw.get("tetra_bin", cfg.tetra_bin)
+    cfg.tetra_args = raw.get("tetra_args", cfg.tetra_args)
+    cfg.policy_dir = raw.get("policy_dir", cfg.policy_dir)
+    cfg.state_dir = raw.get("state_dir", cfg.state_dir)
+    cfg.config_reload_seconds = int(raw.get("config_reload_seconds", cfg.config_reload_seconds))
+    cfg.dns_dump_min_interval_seconds = int(raw.get("dns_dump_min_interval_seconds", cfg.dns_dump_min_interval_seconds))
+
+    cfg.reconcile_on_reload = bool(raw.get("reconcile_on_reload", True))
+    cfg.prewarm_on_start = bool(raw.get("prewarm_on_start", True))
+    cfg.prewarm_on_reconcile = bool(raw.get("prewarm_on_reconcile", True))
+    cfg.dns_retry_attempts = int(raw.get("dns_retry_attempts", 5))
+    cfg.dns_retry_sleep_seconds = float(raw.get("dns_retry_sleep_seconds", 0.2))
+
+    cfg.allowlist = bool(raw.get("allowlist", True))
+    cfg.allowlist_file = str(raw.get("allowlist_file", cfg.allowlist_file))
+    cfg.allowlist_learning_seconds = int(raw.get("allowlist_learning_seconds", cfg.allowlist_learning_seconds))
+    cfg.allowlist_policy_prefix = str(raw.get("allowlist_policy_prefix", cfg.allowlist_policy_prefix))
+    cfg.allowlist_action = str(raw.get("allowlist_action", cfg.allowlist_action))
+    cfg.allowlist_reload_seconds = int(raw.get("allowlist_reload_seconds", cfg.allowlist_reload_seconds))
+    cfg.allowlist_addr_values_per_selector = int(raw.get("allowlist_addr_values_per_selector", cfg.allowlist_addr_values_per_selector))
+    cfg.allowlist_port_values_per_selector = int(raw.get("allowlist_port_values_per_selector", cfg.allowlist_port_values_per_selector))
+    cfg.allowlist_max_allow_selectors_per_policy = int(raw.get("allowlist_max_allow_selectors_per_policy", cfg.allowlist_max_allow_selectors_per_policy))
+    cfg.allowlist_domain_refresh_seconds = int(raw.get("allowlist_domain_refresh_seconds", cfg.allowlist_domain_refresh_seconds))
+    cfg.allowlist_domain_max_ips = int(raw.get("allowlist_domain_max_ips", cfg.allowlist_domain_max_ips))
+
+    rules: List[Rule] = []
+    for r in raw.get("rules", []):
+        rules.append(Rule(
+            name=r["name"],
+            binary=r["binary"],
+            domains=[str(x) for x in r.get("domains", [])],
+            action=str(r.get("action", "Sigkill")),
+            protocol=str(r.get("protocol", "tcp")).lower(),
+            ports=[int(x) for x in r.get("ports", [])],
+            ip_ttl_seconds=int(r.get("ip_ttl_seconds", 900)),
+            max_ips=int(r.get("max_ips", 256)),
+            apply_cooldown_seconds=int(r.get("apply_cooldown_seconds", 1)),
+        ))
+    cfg.rules = rules
+    return cfg
+
+def ensure_dirs(cfg: Config) -> None:
+    os.makedirs(cfg.policy_dir, exist_ok=True)
+    os.makedirs(cfg.state_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(cfg.allowlist_file), exist_ok=True)
+
+# -----------------------------
+# YAML renderers
+# -----------------------------
+
+def render_single_rule_yaml(rule: Rule, cidrs: List[str]) -> str:
+    cidrs_sorted = sorted({c.strip() for c in cidrs if c and c.strip()})
+    port_vals = [str(int(p)) for p in rule.ports]
+    lines: List[str] = []
+    lines.append("apiVersion: cilium.io/v1alpha1")
+    lines.append("kind: TracingPolicy")
+    lines.append("metadata:")
+    lines.append(f"  name: {rule.name}")
+    lines.append("spec:")
+    lines.append("  kprobes:")
+    lines.append("  - call: tcp_connect")
+    lines.append("    syscall: false")
+    lines.append("    args:")
+    lines.append("    - index: 0")
+    lines.append("      type: sock")
+    lines.append("    selectors:")
+    lines.append("    - matchBinaries:")
+    lines.append("      - operator: In")
+    lines.append("        values:")
+    lines.append(f"        - {rule.binary}")
+    lines.append("      matchArgs:")
+    lines.append("      - index: 0")
+    lines.append("        operator: DAddr")
+    lines.append("        values:")
+    for c in cidrs_sorted:
+        lines.append(f"        - {c}")
+    if port_vals:
+        lines.append("      - index: 0")
+        lines.append("        operator: DPort")
+        lines.append("        values:")
+        for p in port_vals:
+            lines.append(f"        - \"{p}\"")
+    lines.append("      matchActions:")
+    lines.append(f"      - action: {rule.action}")
+    lines.append("")
+    return "\n".join(lines)
+
+def render_allowlist_policy_yaml(
+    name: str,
+    call: str,
+    bin_operator: str,
+    bin_value: str,
+    allow_selectors: List[Tuple[List[str], List[List[str]]]],
+    deny_action: str
+) -> str:
+    # allow_selectors: list of (port_values, list_of_addr_chunks)
+    # Each addr_chunk becomes one selector to keep addr values small.
+    lines: List[str] = []
+    lines.append("apiVersion: cilium.io/v1alpha1")
+    lines.append("kind: TracingPolicy")
+    lines.append("metadata:")
+    lines.append(f"  name: {name}")
+    lines.append("spec:")
+    lines.append("  kprobes:")
+    lines.append(f"  - call: {call}")
+    lines.append("    syscall: false")
+    lines.append("    args:")
+    lines.append("    - index: 0")
+    lines.append("      type: sock")
+    lines.append("    selectors:")
+
+    # Allow selectors use NoPost (acts like allow, because of selector short-circuit semantics) :contentReference[oaicite:5]{index=5} :contentReference[oaicite:6]{index=6}
+    for port_vals, addr_chunks in allow_selectors:
+        if not addr_chunks:
+            # allow any addr
+            lines.append("    - matchBinaries:")
+            lines.append(f"      - operator: {bin_operator}")
+            lines.append("        values:")
+            lines.append(f"        - \"{bin_value}\"")
+            if port_vals:
+                lines.append("      matchArgs:")
+                lines.append("      - index: 0")
+                lines.append("        operator: DPort")
+                lines.append("        values:")
+                for pv in port_vals:
+                    lines.append(f"        - \"{pv}\"")
+            lines.append("      matchActions:")
+            lines.append("      - action: NoPost")
+            continue
+
+        for addr_vals in addr_chunks:
+            lines.append("    - matchBinaries:")
+            lines.append(f"      - operator: {bin_operator}")
+            lines.append("        values:")
+            lines.append(f"        - \"{bin_value}\"")
+            lines.append("      matchArgs:")
+            if port_vals:
+                lines.append("      - index: 0")
+                lines.append("        operator: DPort")
+                lines.append("        values:")
+                for pv in port_vals:
+                    lines.append(f"        - \"{pv}\"")
+            lines.append("      - index: 0")
+            lines.append("        operator: DAddr")
+            lines.append("        values:")
+            for av in addr_vals:
+                lines.append(f"        - \"{av}\"")
+            lines.append("      matchActions:")
+            lines.append("      - action: NoPost")
+
+    # Deny selector: kill anything from this binary pattern not matched above.
+    lines.append("    - matchBinaries:")
+    lines.append(f"      - operator: {bin_operator}")
+    lines.append("        values:")
+    lines.append(f"        - \"{bin_value}\"")
+    lines.append("      matchActions:")
+    lines.append(f"      - action: {deny_action}")
+    lines.append("")
+    return "\n".join(lines)
+
+def render_unknown_policy_yaml(name: str, call: str, match_blocks: List[Tuple[str, List[str]]], deny_action: str) -> str:
+    lines: List[str] = []
+    lines.append("apiVersion: cilium.io/v1alpha1")
+    lines.append("kind: TracingPolicy")
+    lines.append("metadata:")
+    lines.append(f"  name: {name}")
+    lines.append("spec:")
+    lines.append("  kprobes:")
+    lines.append(f"  - call: {call}")
+    lines.append("    syscall: false")
+    lines.append("    args:")
+    lines.append("    - index: 0")
+    lines.append("      type: sock")
+    lines.append("    selectors:")
+    lines.append("    - matchBinaries:")
+    for op, vals in match_blocks:
+        if not vals:
+            continue
+        lines.append(f"      - operator: {op}")
+        lines.append("        values:")
+        for v in vals:
+            lines.append(f"        - \"{v}\"")
+    lines.append("      matchActions:")
+    lines.append(f"      - action: {deny_action}")
+    lines.append("")
+    return "\n".join(lines)
+
+# -----------------------------
+# Main controller
+# -----------------------------
+
+class TetraBlocker:
+    def __init__(self, cfg_path: str):
+        self.cfg_path = cfg_path
+        self.cfg = load_config(cfg_path)
+        ensure_dirs(self.cfg)
+
+        self.cfg_mtime = 0.0
+        self.last_cfg_reload = 0.0
+
+        # Existing feature state
+        self.rule_states: Dict[str, RuleState] = {}
+        self.last_dns_dump_ts = 0.0
+        self.last_dns_dump_text = ""
+        self.pending_rule_apply: Set[str] = set()
+
+        # Allowlist state
+        self.allowlist_mtime = 0.0
+        self.last_allowlist_reload = 0.0
+        self.allowlist_obj: dict = {}
+        self.allowlist_items: Dict[Tuple[str, str, str, int], ALItem] = {}
+        self.allowlist_learning_started_at: float = 0.0
+        self.allowlist_learning_completed: bool = False
+        self.allowlist_dirty: bool = False
+        self.allowlist_last_flush: float = 0.0
+
+        self.domain_ip_cache: Dict[str, Dict[str, float]] = {}  # domain -> cidr -> last_seen
+        self.domain_last_refresh: float = 0.0
+
+        self.allowlist_policy_state_path = os.path.join(self.cfg.state_dir, "allowlist_policies.json")
+        self.allowlist_policy_state: Dict[str, str] = {}  # policy_name -> yaml_hash
+        self.pending_allowlist_reconcile: bool = True
+
+        self.stop = False
+
+        self._load_rule_states()
+        self._load_allowlist_policy_state()
+        self._load_or_init_allowlist(force_init=True)
+
+        # Seed / prewarm
+        if self.cfg.prewarm_on_start:
+            for r in self.cfg.rules:
+                for d in r.norm_domains():
+                    prewarm_domain(d)
+                self.pending_rule_apply.add(r.name)
+
+    # ---------- signals ----------
+
+    def handle_signal(self, signum, frame):
+        self.stop = True
+
+    # ---------- throttled dns dump ----------
+
+    def throttled_dns_dump(self) -> str:
+        t = now()
+        min_iv = max(0, int(self.cfg.dns_dump_min_interval_seconds))
+        if min_iv == 0:
+            self.last_dns_dump_text = dns_dump(self.cfg)
+            self.last_dns_dump_ts = t
+            return self.last_dns_dump_text
+        if t - self.last_dns_dump_ts < min_iv and self.last_dns_dump_text:
+            return self.last_dns_dump_text
+        self.last_dns_dump_text = dns_dump(self.cfg)
+        self.last_dns_dump_ts = t
+        return self.last_dns_dump_text
+
+    # ---------- existing rule feature persistence ----------
+
+    def _rule_state_path(self, name: str) -> str:
+        return os.path.join(self.cfg.state_dir, f"{name}.json")
+
+    def _load_rule_states(self) -> None:
+        self.rule_states = {}
+        try:
+            for fn in os.listdir(self.cfg.state_dir):
+                if not fn.endswith(".json"):
+                    continue
+                if fn == "allowlist_policies.json":
+                    continue
+                path = os.path.join(self.cfg.state_dir, fn)
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        obj = json.load(f)
+                    if not obj.get("name"):
+                        continue
+                    st = RuleState(
+                        name=str(obj["name"]),
+                        spec_hash=str(obj.get("spec_hash", "")),
+                        last_apply_ts=float(obj.get("last_apply_ts", 0.0)),
+                        last_yaml_hash=str(obj.get("last_yaml_hash", "")),
+                        ip_cache={str(k): float(v) for k, v in (obj.get("ip_cache", {}) or {}).items()},
+                    )
+                    self.rule_states[st.name] = st
+                except Exception:
+                    continue
+        except FileNotFoundError:
+            pass
+
+    def _save_rule_state(self, st: RuleState) -> None:
+        obj = {
+            "name": st.name,
+            "spec_hash": st.spec_hash,
+            "last_apply_ts": st.last_apply_ts,
+            "last_yaml_hash": st.last_yaml_hash,
+            "ip_cache": st.ip_cache,
+        }
+        atomic_write_json(self._rule_state_path(st.name), obj, mode=0o600)
+
+    # ---------- allowlist policy hash persistence ----------
+
+    def _load_allowlist_policy_state(self) -> None:
+        self.allowlist_policy_state = {}
+        try:
+            with open(self.allowlist_policy_state_path, "r", encoding="utf-8") as f:
+                obj = json.load(f)
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    self.allowlist_policy_state[str(k)] = str(v)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
+    def _save_allowlist_policy_state(self) -> None:
+        atomic_write_json(self.allowlist_policy_state_path, self.allowlist_policy_state, mode=0o600)
+
+    # ---------- allowlist file ----------
+
+    def _load_or_init_allowlist(self, force_init: bool) -> None:
+        # Load allowlist file; if missing, create with a safe seed.
+        path = self.cfg.allowlist_file
+        if not os.path.exists(path):
+            self.allowlist_obj = self._default_allowlist()
+            atomic_write_json(path, self.allowlist_obj, mode=0o644)
+            self.allowlist_mtime = os.stat(path).st_mtime
+        else:
+            self._reload_allowlist_if_changed(force=force_init)
+
+        self._materialize_allowlist_items()
+
+    def _default_allowlist(self) -> dict:
+        # Seed: allow systemd-resolved to do DNS (tcp/udp 53) to any destination.
+        # This prevents "DNS blackout" once enforce starts.
+        t = now()
+        return {
+            "version": 1,
+            "learning": {
+                "duration_seconds": int(self.cfg.allowlist_learning_seconds),
+                "started_at": 0.0,
+                "completed": False,
+                "completed_at": 0.0
+            },
+            "items": [
+                {
+                    "binary": "/usr/lib/systemd/systemd-resolved",
+                    "binary_operator": "In",
+                    "proto": "udp",
+                    "port": 53,
+                    "domains": ["*"],
+                    "cidrs": [],
+                    "updated_at": t
+                },
+                {
+                    "binary": "/usr/lib/systemd/systemd-resolved",
+                    "binary_operator": "In",
+                    "proto": "tcp",
+                    "port": 53,
+                    "domains": ["*"],
+                    "cidrs": [],
+                    "updated_at": t
+                }
+            ]
+        }
+
+    def _reload_allowlist_if_changed(self, force: bool) -> None:
+        t = now()
+        if not force and (t - self.last_allowlist_reload) < max(1, int(self.cfg.allowlist_reload_seconds)):
+            return
+        self.last_allowlist_reload = t
+
+        path = self.cfg.allowlist_file
+        try:
+            st = os.stat(path)
+        except FileNotFoundError:
+            return
+
+        if not force and st.st_mtime <= self.allowlist_mtime:
+            return
+
+        with open(path, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+
+        if not isinstance(obj, dict):
+            return
+
+        self.allowlist_obj = obj
+        self.allowlist_mtime = st.st_mtime
+        self._materialize_allowlist_items()
+        self.pending_allowlist_reconcile = True
+
+    def _materialize_allowlist_items(self) -> None:
+        obj = self.allowlist_obj or {}
+        learning = obj.get("learning", {}) or {}
+        self.allowlist_learning_started_at = float(learning.get("started_at", 0.0) or 0.0)
+        self.allowlist_learning_completed = bool(learning.get("completed", False))
+
+        items: Dict[Tuple[str, str, str, int], ALItem] = {}
+        for it in (obj.get("items", []) or []):
+            try:
+                binary = str(it.get("binary", "")).strip()
+                bop = str(it.get("binary_operator", "In")).strip() or "In"
+                proto = str(it.get("proto", "")).strip().lower()
+                port = int(it.get("port", 0))
+                doms = [norm_domain(x) if x != "*" else "*" for x in (it.get("domains", []) or [])]
+                doms = [d for d in doms if d]
+                cidrs = [str(x).strip() for x in (it.get("cidrs", []) or []) if str(x).strip()]
+                upd = float(it.get("updated_at", 0.0) or 0.0)
+                if not binary or proto not in ("tcp", "udp") or port <= 0:
+                    continue
+                item = ALItem(binary=binary, binary_operator=bop, proto=proto, port=port, domains=sorted(set(doms)), cidrs=sorted(set(cidrs)), updated_at=upd)
+                items[item.key()] = item
+            except Exception:
+                continue
+        self.allowlist_items = items
+
+    def _flush_allowlist_if_needed(self) -> None:
+        if not self.allowlist_dirty:
+            return
+        # Debounce writes
+        if now() - self.allowlist_last_flush < 1.0:
+            return
+        self.allowlist_last_flush = now()
+        self.allowlist_dirty = False
+        atomic_write_json(self.cfg.allowlist_file, self.allowlist_obj, mode=0o644)
+        self.allowlist_mtime = os.stat(self.cfg.allowlist_file).st_mtime
+
+    def _set_learning_flag(self, started_at: float, completed: bool) -> None:
+        if "learning" not in self.allowlist_obj:
+            self.allowlist_obj["learning"] = {}
+        self.allowlist_obj["learning"]["duration_seconds"] = int(self.cfg.allowlist_learning_seconds)
+        self.allowlist_obj["learning"]["started_at"] = float(started_at)
+        self.allowlist_obj["learning"]["completed"] = bool(completed)
+        self.allowlist_obj["learning"]["completed_at"] = float(now() if completed else 0.0)
+        self.allowlist_dirty = True
+        self._materialize_allowlist_items()
+
+    # ---------- allowlist learning ----------
+
+    def _learning_mode(self) -> bool:
+        if not self.cfg.allowlist:
+            return False
+        if self.allowlist_learning_completed:
+            return False
+        # If never started, start now.
+        if self.allowlist_learning_started_at <= 0.0:
+            self._set_learning_flag(started_at=now(), completed=False)
+        return True
+
+    def _maybe_finish_learning(self) -> None:
+        if not self.cfg.allowlist:
+            return
+        if self.allowlist_learning_completed:
+            return
+        if self.allowlist_learning_started_at <= 0.0:
+            return
+        if now() - self.allowlist_learning_started_at >= float(self.cfg.allowlist_learning_seconds):
+            self._set_learning_flag(started_at=self.allowlist_learning_started_at, completed=True)
+            self.pending_allowlist_reconcile = True
+
+    def _allowlist_add_observation(self, binary: str, proto: str, port: int, domains: List[str], dest_ip: str) -> None:
+        if not binary or proto not in ("tcp", "udp") or port <= 0:
+            return
+
+        # Use exact binary by default in learning.
+        bop = "In"
+        bval = binary
+
+        doms_norm: Set[str] = set()
+        for d in domains:
+            if d == "*":
+                doms_norm.add("*")
+            else:
+                nd = norm_domain(d)
+                if nd:
+                    doms_norm.add(nd)
+
+        cidrs_norm: Set[str] = set()
+        if valid_ip(dest_ip):
+            cidrs_norm.add(ip_to_cidr(dest_ip))
+
+        key = (bop, bval, proto, int(port))
+        item = self.allowlist_items.get(key)
+        t = now()
+        if item is None:
+            item = ALItem(binary=bval, binary_operator=bop, proto=proto, port=int(port), domains=sorted(doms_norm), cidrs=sorted(cidrs_norm), updated_at=t)
+            self.allowlist_items[key] = item
+        else:
+            item.updated_at = t
+            item.domains = sorted(set(item.domains) | doms_norm)
+            item.cidrs = sorted(set(item.cidrs) | cidrs_norm)
+
+        # Rewrite allowlist_obj.items from allowlist_items (stable, human editable, but we keep it normalized)
+        self.allowlist_obj["items"] = []
+        for k in sorted(self.allowlist_items.keys()):
+            it = self.allowlist_items[k]
+            self.allowlist_obj["items"].append({
+                "binary": it.binary,
+                "binary_operator": it.binary_operator,
+                "proto": it.proto,
+                "port": int(it.port),
+                "domains": it.domains,
+                "cidrs": it.cidrs,
+                "updated_at": float(it.updated_at),
+            })
+        self.allowlist_dirty = True
+
+    # ---------- allowlist enforcement policy build ----------
+
+    def _refresh_domain_ips(self) -> None:
+        # Periodic prewarm + dns dump inversion, to keep domain->ip cache fresh.
+        if not self.cfg.allowlist:
+            return
+        if now() - self.domain_last_refresh < max(1, int(self.cfg.allowlist_domain_refresh_seconds)):
+            return
+        self.domain_last_refresh = now()
+
+        # Prewarm all domains in allowlist (excluding "*")
+        domains: Set[str] = set()
+        for it in self.allowlist_items.values():
+            for d in it.domains:
+                if d and d != "*":
+                    domains.add(d)
+        for d in sorted(domains):
+            prewarm_domain(d)
+
+        # Update domain_ip_cache from dns dump
+        try:
+            txt = self.throttled_dns_dump()
+            pairs = parse_dns_dump(txt)
+        except Exception:
+            return
+
+        t = now()
+        for ip, dom in pairs:
+            cidr = ip_to_cidr(ip)
+            m = self.domain_ip_cache.setdefault(dom, {})
+            m[cidr] = t
+
+        # Expire and cap per domain
+        ttl = 900.0
+        max_ips = max(1, int(self.cfg.allowlist_domain_max_ips))
+        for dom in list(self.domain_ip_cache.keys()):
+            m = self.domain_ip_cache[dom]
+            # expire
+            expire_before = t - ttl
+            for cidr in list(m.keys()):
+                if m[cidr] < expire_before:
+                    del m[cidr]
+            # cap
+            if len(m) > max_ips:
+                items = sorted(m.items(), key=lambda kv: kv[1], reverse=True)[:max_ips]
+                self.domain_ip_cache[dom] = dict(items)
+
+    def _build_allow_groups(self, proto: str) -> Dict[Tuple[str, str], Dict[Tuple[Tuple[str, ...], Tuple[str, ...]], Set[int]]]:
+        """
+        Returns:
+          groups[(bin_operator, bin_value)][(domains_tuple, cidrs_tuple)] -> set(ports)
+        We keep strictness by grouping by exact destination-set, then merging ports only when destination-set identical.
+        """
+        groups: Dict[Tuple[str, str], Dict[Tuple[Tuple[str, ...], Tuple[str, ...]], Set[int]]] = {}
+        for it in self.allowlist_items.values():
+            if it.proto != proto:
+                continue
+            bk = (it.binary_operator, it.binary)
+            doms = tuple(sorted(set(it.domains)))
+            cidrs = tuple(sorted(set(it.cidrs)))
+            dk = (doms, cidrs)
+            groups.setdefault(bk, {}).setdefault(dk, set()).add(int(it.port))
+        return groups
+
+    def _policy_name(self, suffix: str) -> str:
+        return f"{self.cfg.allowlist_policy_prefix}-{suffix}"
+
+    def _apply_policy_idempotent(self, policy_name: str, yaml: str) -> None:
+        yaml_hash = sha256_hex(yaml.encode("utf-8"))
+        path = os.path.join(self.cfg.policy_dir, f"{policy_name}.yaml")
+
+        if self.allowlist_policy_state.get(policy_name) == yaml_hash and os.path.exists(path):
+            return
+
+        atomic_write(path, yaml, mode=0o644)
+        tetra_delete_policy(self.cfg, policy_name)
+        tetra_add_policy(self.cfg, path)
+
+        self.allowlist_policy_state[policy_name] = yaml_hash
+        self._save_allowlist_policy_state()
+
+    def _cleanup_allowlist_policies(self) -> None:
+        prefix = self.cfg.allowlist_policy_prefix + "-"
+        # delete by tetra list
+        for name in tetra_list_policies(self.cfg):
+            if name.startswith(prefix):
+                tetra_delete_policy(self.cfg, name)
+                safe_unlink(os.path.join(self.cfg.policy_dir, f"{name}.yaml"))
+                if name in self.allowlist_policy_state:
+                    del self.allowlist_policy_state[name]
+        self._save_allowlist_policy_state()
+
+    def _reconcile_allowlist_policies(self) -> None:
+        if not self.cfg.allowlist:
+            self._cleanup_allowlist_policies()
+            self.pending_allowlist_reconcile = False
+            return
+
+        # Learning => no enforce policies
+        if self._learning_mode():
+            self._cleanup_allowlist_policies()
+            self.pending_allowlist_reconcile = False
+            return
+
+        # Enforce
+        self._refresh_domain_ips()
+
+        # Build per-proto allow groups
+        for proto, call in (("tcp", "tcp_connect"), ("udp", "udp_sendmsg")):
+            groups = self._build_allow_groups(proto)
+
+            # Build unknown policy match blocks: NotIn/NotPrefix/NotPostfix for allowed binaries.
+            exact_vals: List[str] = []
+            prefix_vals: List[str] = []
+            postfix_vals: List[str] = []
+
+            for (bop, bval) in groups.keys():
+                if bop == "In":
+                    exact_vals.append(bval)
+                elif bop == "Prefix":
+                    prefix_vals.append(bval)
+                elif bop == "Postfix":
+                    postfix_vals.append(bval)
+
+            match_blocks: List[Tuple[str, List[str]]] = []
+            if exact_vals:
+                match_blocks.append(("NotIn", sorted(set(exact_vals))))
+            if prefix_vals:
+                match_blocks.append(("NotPrefix", sorted(set(prefix_vals))))
+            if postfix_vals:
+                match_blocks.append(("NotPostfix", sorted(set(postfix_vals))))
+
+            unknown_name = self._policy_name(f"unknown-{proto}")
+            unknown_yaml = render_unknown_policy_yaml(
+                name=unknown_name,
+                call=call,
+                match_blocks=match_blocks if match_blocks else [("NotIn", ["__none__"])],
+                deny_action=self.cfg.allowlist_action
+            )
+            self._apply_policy_idempotent(unknown_name, unknown_yaml)
+
+            # Build binary-specific policies
+            for (bop, bval), destmap in groups.items():
+                # Pack allow selectors within max selectors constraints. Each allow selector uses NoPost,
+                # then one deny selector uses Sigkill. Total selectors per hook <= 5 :contentReference[oaicite:7]{index=7}
+                allow_selectors_built: List[Tuple[List[str], List[List[str]]]] = []
+
+                # Each dest-key is (domains_tuple, cidrs_tuple) -> ports_set
+                # We will create allow selectors per dest-key; if too many, we'll keep first few.
+                dest_items = []
+                for (doms, cidrs), ports_set in destmap.items():
+                    dest_items.append((doms, cidrs, sorted(ports_set)))
+                # stable order
+                dest_items.sort(key=lambda x: (",".join(x[0]), ",".join(x[1]), ",".join(map(str, x[2]))))
+
+                # Build allow selectors, but must stay within max_allow_selectors_per_policy.
+                max_allow_sel = max(1, int(self.cfg.allowlist_max_allow_selectors_per_policy))
+
+                for doms, cidrs, ports in dest_items:
+                    # Ports values (compressed)
+                    port_vals = compress_ports_to_values(ports, max_values=int(self.cfg.allowlist_port_values_per_selector))
+
+                    # Dest allow-any?
+                    allow_any_dest = ("*" in doms)
+
+                    # Allowed cidrs include:
+                    # - explicit learned cidrs
+                    # - plus expanded domain IPs (from domain_ip_cache)
+                    allow_cidrs: List[str] = []
+                    if not allow_any_dest:
+                        allow_cidrs.extend(list(cidrs))
+                        for d in doms:
+                            if d and d != "*":
+                                m = self.domain_ip_cache.get(d, {})
+                                allow_cidrs.extend(list(m.keys()))
+                        allow_cidrs = sorted(set([c for c in allow_cidrs if c]))
+
+                    if allow_any_dest:
+                        # One selector allows any addr for these ports
+                        allow_selectors_built.append((port_vals, []))
+                    else:
+                        # Chunk cidrs into <= addr_values_per_selector per selector
+                        av = max(1, int(self.cfg.allowlist_addr_values_per_selector))
+                        chunks = chunk_list(allow_cidrs, av)
+                        # Each chunk becomes one allow selector. Ensure we do not exceed budget.
+                        for ch in chunks:
+                            if len(allow_selectors_built) >= max_allow_sel:
+                                break
+                            allow_selectors_built.append((port_vals, [ch]))
+
+                    if len(allow_selectors_built) >= max_allow_sel:
+                        break
+
+                # Ensure we have at least one allow selector; if none, we still create policy that kills everything for this binary.
+                pol_name = self._policy_name(f"{proto}-{sha256_hex(f'{bop}:{bval}'.encode())[:10]}")
+                yaml = render_allowlist_policy_yaml(
+                    name=pol_name,
+                    call=call,
+                    bin_operator=bop,
+                    bin_value=bval,
+                    allow_selectors=allow_selectors_built,
+                    deny_action=self.cfg.allowlist_action
+                )
+                self._apply_policy_idempotent(pol_name, yaml)
+
+        self.pending_allowlist_reconcile = False
+
+    # ---------- existing rule apply ----------
+
+    def _ensure_rule_state(self, rule: Rule) -> RuleState:
+        st = self.rule_states.get(rule.name)
+        if st is None:
+            st = RuleState(name=rule.name)
+            self.rule_states[rule.name] = st
+        if not st.spec_hash:
+            st.spec_hash = rule.spec_hash()
+        return st
+
+    def _refresh_rule_ips(self, rule: Rule, st: RuleState) -> None:
+        domset = set(rule.norm_domains())
+        attempts = max(1, int(self.cfg.dns_retry_attempts))
+        sleep_s = max(0.0, float(self.cfg.dns_retry_sleep_seconds))
+
+        for i in range(attempts):
+            txt = self.throttled_dns_dump()
+            pairs = parse_dns_dump(txt)
+
+            t = now()
+            for ip, dom in pairs:
+                if dom in domset:
+                    st.ip_cache[ip_to_cidr(ip)] = t
+
+            # expire
+            expire_before = t - float(rule.ip_ttl_seconds)
+            for cidr in list(st.ip_cache.keys()):
+                if st.ip_cache[cidr] < expire_before:
+                    del st.ip_cache[cidr]
+
+            # cap
+            if len(st.ip_cache) > int(rule.max_ips):
+                items = sorted(st.ip_cache.items(), key=lambda kv: kv[1], reverse=True)[: int(rule.max_ips)]
+                st.ip_cache = dict(items)
+
+            if st.ip_cache:
+                return
+
+            if i < attempts - 1:
+                time.sleep(sleep_s)
+
+    def apply_rule(self, rule: Rule, force: bool) -> None:
+        st = self._ensure_rule_state(rule)
+        if not force:
+            cd = max(0, int(rule.apply_cooldown_seconds))
+            if cd > 0 and (now() - st.last_apply_ts) < cd:
+                return
+
+        if not st.ip_cache:
+            self._refresh_rule_ips(rule, st)
+
+        cidrs = sorted(st.ip_cache.keys())
+        if not cidrs:
+            self._save_rule_state(st)
+            return
+
+        yaml = render_single_rule_yaml(rule, cidrs)
+        yaml_hash = sha256_hex(yaml.encode("utf-8"))
+        yaml_path = os.path.join(self.cfg.policy_dir, f"{rule.name}.yaml")
+
+        if st.last_yaml_hash == yaml_hash and os.path.exists(yaml_path) and not force:
+            st.last_apply_ts = now()
+            self._save_rule_state(st)
+            return
+
+        atomic_write(yaml_path, yaml, mode=0o644)
+        tetra_delete_policy(self.cfg, rule.name)
+        tetra_add_policy(self.cfg, yaml_path)
+
+        st.last_apply_ts = now()
+        st.last_yaml_hash = yaml_hash
+        st.spec_hash = rule.spec_hash()
+        self._save_rule_state(st)
+
+        print(f"policy applied name={rule.name} ips={len(cidrs)} path={yaml_path}", flush=True)
+
+    # ---------- config reload + allowlist toggle ----------
+
+    def maybe_reload_config(self) -> None:
+        t = now()
+        if t - self.last_cfg_reload < max(1, int(self.cfg.config_reload_seconds)):
+            return
+        self.last_cfg_reload = t
+
+        try:
+            st = os.stat(self.cfg_path)
+        except FileNotFoundError:
+            return
+
+        if st.st_mtime <= self.cfg_mtime:
+            return
+
+        old_allow = self.cfg.allowlist
+        old_allow_file = self.cfg.allowlist_file
+        old_prefix = self.cfg.allowlist_policy_prefix
+
+        self.cfg = load_config(self.cfg_path)
+        ensure_dirs(self.cfg)
+        self.cfg_mtime = st.st_mtime
+        print(f"config reloaded mtime={self.cfg_mtime}", flush=True)
+
+        # allowlist file path changed => reload allowlist
+        if self.cfg.allowlist_file != old_allow_file:
+            self.allowlist_mtime = 0.0
+            self._load_or_init_allowlist(force_init=True)
+
+        # prefix changed => cleanup old prefix policies
+        if self.cfg.allowlist_policy_prefix != old_prefix:
+            self._cleanup_allowlist_policies()
+
+        # allowlist toggled off => cleanup
+        if old_allow and (not self.cfg.allowlist):
+            self._cleanup_allowlist_policies()
+
+        self.pending_allowlist_reconcile = True
+
+    # ---------- event handling ----------
+
+    def _handle_process_connect_for_allowlist(self, ev: dict) -> None:
+        pc = ev.get("process_connect")
+        if not pc:
+            return
+        proc = pc.get("process", {}) or {}
+        binary = str(proc.get("binary", "")).strip()
+        proto = str(pc.get("protocol", "")).strip().lower()
+        if proto == "tcp":
+            p = "tcp"
+        elif proto == "udp":
+            p = "udp"
+        else:
+            # Unknown protocol, skip
+            return
+        dest_ip = str(pc.get("destination_ip", "")).strip()
+        try:
+            port = int(pc.get("destination_port", 0))
+        except Exception:
+            port = 0
+
+        # destination_names may exist
+        names = pc.get("destination_names", []) or []
+        doms: List[str] = []
+        for n in names:
+            if isinstance(n, str):
+                nd = norm_domain(n)
+                if nd:
+                    doms.append(nd)
+
+        # If no domain, try dns dump inversion ip->domain
+        if not doms and valid_ip(dest_ip):
+            try:
+                txt = self.throttled_dns_dump()
+                pairs = parse_dns_dump(txt)
+                for ip, dom in pairs:
+                    if ip == dest_ip:
+                        doms.append(dom)
+                        break
+            except Exception:
+                pass
+
+        if self._learning_mode():
+            self._allowlist_add_observation(binary=binary, proto=p, port=port, domains=doms, dest_ip=dest_ip)
+
+    def _handle_process_dns_for_allowlist(self, ev: dict) -> None:
+        # process_dns does not carry answer IP in your environment (known constraint),
+        # but it is still useful to learn "binary -> domain" and DNS server IP:53.
+        pd = ev.get("process_dns")
+        if not pd:
+            return
+        proc = pd.get("process", {}) or {}
+        dns = pd.get("dns", {}) or {}
+        sock = pd.get("socket", {}) or {}
+        if not dns.get("response", False):
+            return
+        if int(dns.get("return_code", 0)) != 0:
+            return
+        binary = str(proc.get("binary", "")).strip()
+        names = dns.get("names", []) or []
+        doms = []
+        for n in names:
+            if isinstance(n, str):
+                dn = norm_domain(n)
+                if dn:
+                    doms.append(dn)
+        dest_ip = str(sock.get("destination_ip", "")).strip()
+        dest_port = int(sock.get("destination_port", 53) or 53)
+        # treat as udp by default; also record tcp 53 if you want, but keep minimal.
+        if self._learning_mode():
+            self._allowlist_add_observation(binary=binary, proto="udp", port=dest_port, domains=doms, dest_ip=dest_ip)
+
+    def run(self):
+        signal.signal(signal.SIGINT, self.handle_signal)
+        signal.signal(signal.SIGTERM, self.handle_signal)
+
+        p = start_event_stream(self.cfg)
+        print("event stream started", flush=True)
+
+        while not self.stop:
+            self.maybe_reload_config()
+            self._reload_allowlist_if_changed(force=False)
+
+            # learning window progression
+            if self.cfg.allowlist:
+                self._maybe_finish_learning()
+
+            # If allowlist toggled off, ensure policies cleaned.
+            if not self.cfg.allowlist:
+                if self.pending_allowlist_reconcile:
+                    self._cleanup_allowlist_policies()
+                    self.pending_allowlist_reconcile = False
+
+            # Flush allowlist file if updated by learning
+            self._flush_allowlist_if_needed()
+
+            # Reconcile allowlist policies if needed
+            if self.pending_allowlist_reconcile:
+                try:
+                    self._reconcile_allowlist_policies()
+                except Exception as e:
+                    print(f"allowlist reconcile failed err={e}", flush=True)
+                    self.pending_allowlist_reconcile = False
+
+            # Apply pending classic rules (force on start/reload)
+            if self.pending_rule_apply:
+                for rn in list(self.pending_rule_apply):
+                    rule = next((x for x in self.cfg.rules if x.name == rn), None)
+                    try:
+                        if rule:
+                            self.apply_rule(rule, force=True)
+                    except Exception as e:
+                        print(f"apply failed name={rn} err={e}", flush=True)
+                    finally:
+                        self.pending_rule_apply.discard(rn)
+
+            # Restart event stream if exited
+            if p.poll() is not None:
+                rc = p.returncode
+                err_tail = ""
+                try:
+                    if p.stderr:
+                        err_tail = p.stderr.read()[-2000:]
+                except Exception:
+                    pass
+                print(f"event stream exited rc={rc} err_tail={err_tail!r}", flush=True)
+                time.sleep(1)
+                p = start_event_stream(self.cfg)
+                continue
+
+            if p.stdout is None:
+                time.sleep(0.2)
+                continue
+
+            rlist, _, _ = select.select([p.stdout], [], [], 0.5)
+            if not rlist:
+                continue
+
+            line = p.stdout.readline()
+            if not line:
+                continue
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                ev = json.loads(line)
+            except Exception:
+                continue
+
+            # allowlist learning uses process_connect + process_dns
+            if self.cfg.allowlist:
+                self._handle_process_connect_for_allowlist(ev)
+                self._handle_process_dns_for_allowlist(ev)
+
+        try:
+            p.terminate()
+        except Exception:
+            pass
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", required=True)
+    args = ap.parse_args()
+    tb = TetraBlocker(args.config)
+    tb.run()
+
+if __name__ == "__main__":
+    main()
+
