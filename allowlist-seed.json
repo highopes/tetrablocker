@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "learning": {
+    "duration_seconds": 1800,
+    "started_at": 0.0,
+    "completed": false,
+    "completed_at": 0.0
+  },
+  "items": [
+    {
+      "binary": "/usr/lib/systemd/systemd-resolved",
+      "binary_operator": "In",
+      "proto": "udp",
+      "port": 53,
+      "domains": ["*"],
+      "cidrs": [],
+      "updated_at": 0.0
+    },
+    {
+      "binary": "/usr/lib/systemd/systemd-resolved",
+      "binary_operator": "In",
+      "proto": "tcp",
+      "port": 53,
+      "domains": ["*"],
+      "cidrs": [],
+      "updated_at": 0.0
+    },
+    {
+      "binary": "/lib/systemd/systemd-resolved",
+      "binary_operator": "In",
+      "proto": "udp",
+      "port": 53,
+      "domains": ["*"],
+      "cidrs": [],
+      "updated_at": 0.0
+    },
+    {
+      "binary": "/lib/systemd/systemd-resolved",
+      "binary_operator": "In",
+      "proto": "tcp",
+      "port": 53,
+      "domains": ["*"],
+      "cidrs": [],
+      "updated_at": 0.0
+    },
+
+    {
+      "binary": "/usr/local/bin/tetra",
+      "binary_operator": "In",
+      "proto": "tcp",
+      "port": 54321,
+      "domains": ["localhost."],
+      "cidrs": ["127.0.0.1/32"],
+      "updated_at": 0.0
+    },
+    {
+      "binary": "/opt/splunkforwarder/bin/splunkd",
+      "binary_operator": "In",
+      "proto": "tcp",
+      "port": 9997,
+      "domains": [],
+      "cidrs": ["10.75.53.97/32"],
+      "updated_at": 0.0
+    }
+  ]
+}

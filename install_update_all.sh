@@ -7,6 +7,7 @@ WORKDIR="$(pwd)"
 BIN_SRC="${WORKDIR}/tetrablocker"
 CONF_SRC="${WORKDIR}/tetrablocker.conf"
 UNIT_SRC="${WORKDIR}/tetrablocker.service"
+SEED_SRC="${WORKDIR}/allowlist-seed.json"
 
 BIN_DST="/usr/local/bin/tetrablocker"
 CONF_DST="/etc/tetrablocker/tetrablocker.conf"
@@ -28,6 +29,7 @@ check_inputs() {
   [[ -f "$BIN_SRC" ]] || die "missing file: $BIN_SRC"
   [[ -f "$CONF_SRC" ]] || die "missing file: $CONF_SRC"
   [[ -f "$UNIT_SRC" ]] || die "missing file: $UNIT_SRC"
+  [[ -f "$SEED_SRC" ]] || die "missing file: $SEED_SRC"
 }
 
 backup_if_exists() {
@@ -95,6 +97,29 @@ PY
   install -d -m 0755 "$allowlist_dir"
 }
 
+seed_allowlist_if_missing() {
+  local allowlist_file
+  allowlist_file="$(python3 - <<'PY'
+import json
+p="/etc/tetrablocker/tetrablocker.conf"
+try:
+    with open(p,"r",encoding="utf-8") as f:
+        obj=json.load(f)
+    print(obj.get("allowlist_file") or "/etc/tetrablocker/allowlist.json")
+except Exception:
+    print("/etc/tetrablocker/allowlist.json")
+PY
+  )"
+
+  if [[ -e "$allowlist_file" ]]; then
+    log "allowlist file exists; keep as-is: $allowlist_file"
+    return 0
+  fi
+
+  log "seeding allowlist -> $allowlist_file"
+  install -m 0644 "$SEED_SRC" "$allowlist_file"
+}
+
 validate() {
   log "validating python script syntax"
   python3 -m py_compile "$BIN_DST"
@@ -108,6 +133,21 @@ with open(p,"r",encoding="utf-8") as f:
 print("ok")
 PY
 
+  log "validating seed allowlist JSON"
+  python3 - <<'PY'
+import json
+p="allowlist-seed.json"
+# read from current working dir is unreliable; validate installed seed instead
+# so just validate source file path used by installer
+import os
+src=os.environ.get("SEED_SRC")
+with open(src,"r",encoding="utf-8") as f:
+    json.load(f)
+print("ok")
+PY
+}
+
+check_tetra_bin_best_effort() {
   log "checking tetra_bin path (best-effort)"
   python3 - <<'PY'
 import json, os, shutil
@@ -178,11 +218,18 @@ main() {
   stop_service_if_running
   install_files
   ensure_dirs_from_conf
+  seed_allowlist_if_missing
+
+  # Export for validate() seed check
+  export SEED_SRC
+
   validate
+  check_tetra_bin_best_effort
   reload_and_start
   print_help
   log "done"
 }
 
 main "$@"
+
 

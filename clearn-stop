@@ -1,37 +1,149 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-TP_PREFIX="tb-"
-TP_DIR="/etc/tetragon/tetragon.tp.d"
-TETRA_BIN="${TETRA_BIN:-tetra}"
+SCRIPT_NAME="$(basename "$0")"
 
-log() { echo "[clean-stop] $*"; }
-warn() { echo "[clean-stop] WARN: $*" >&2; }
+CONF_PATH="${CONF_PATH:-/etc/tetrablocker/tetrablocker.conf}"
+
+TP_DIR_DEFAULT="/etc/tetragon/tetragon.tp.d"
+STATE_DIR_DEFAULT="/var/lib/tetrablocker"
+
+TP_PREFIXES="${TP_PREFIXES:-tb-}"   # comma-separated, e.g. "tb-,block-"
+TETRA_BIN="${TETRA_BIN:-}"          # optional override
+
+PURGE_STATE=0
+
+log() { echo "[$SCRIPT_NAME] $*"; }
+warn() { echo "[$SCRIPT_NAME] WARN: $*" >&2; }
+die() { echo "[$SCRIPT_NAME] ERROR: $*" >&2; exit 1; }
 
 need_root() {
   if [[ "$(id -u)" -ne 0 ]]; then
-    echo "[clean-stop] ERROR: must run as root (try: sudo ./clean-stop)" >&2
-    exit 1
+    die "must run as root (try: sudo ./${SCRIPT_NAME})"
   fi
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --purge-state)
+        PURGE_STATE=1
+        shift
+        ;;
+      -h|--help)
+        cat <<EOF
+Usage: $SCRIPT_NAME [--purge-state]
+
+Environment variables:
+  CONF_PATH=/etc/tetrablocker/tetrablocker.conf
+  TP_PREFIXES="tb-"            # comma-separated prefixes, e.g. "tb-,block-"
+  TETRA_BIN=/usr/local/bin/tetra
+
+Notes:
+  - Stops tetrablocker only (does NOT stop tetragon-enterprise).
+  - Deletes tracingpolicies matching prefixes (runtime) and YAML files on disk.
+  - --purge-state removes allowlist_policies.json (does NOT touch allowlist.json).
+EOF
+        exit 0
+        ;;
+      *)
+        die "unknown arg: $1"
+        ;;
+    esac
+  done
+}
+
+py_get_conf_field() {
+  local field="$1"
+  python3 - <<PY
+import json
+p="${CONF_PATH}"
+try:
+    with open(p,"r",encoding="utf-8") as f:
+        obj=json.load(f)
+    v=obj.get("${field}")
+    if v is None:
+        raise KeyError
+    print(v)
+except Exception:
+    print("")
+PY
+}
+
+resolve_paths_from_conf() {
+  local td sd tb
+  td="$(py_get_conf_field policy_dir || true)"
+  sd="$(py_get_conf_field state_dir || true)"
+  tb="$(py_get_conf_field tetra_bin || true)"
+
+  TP_DIR="${td:-$TP_DIR_DEFAULT}"
+  STATE_DIR="${sd:-$STATE_DIR_DEFAULT}"
+
+  if [[ -n "${TETRA_BIN}" ]]; then
+    :
+  elif [[ -n "${tb}" ]]; then
+    TETRA_BIN="${tb}"
+  else
+    TETRA_BIN="tetra"
+  fi
+}
+
+check_tetra() {
+  if [[ "${TETRA_BIN}" == /* ]]; then
+    [[ -x "${TETRA_BIN}" ]] || die "tetra binary not executable: ${TETRA_BIN}"
+  else
+    command -v "${TETRA_BIN}" >/dev/null 2>&1 || die "tetra binary not found in PATH: ${TETRA_BIN}"
+  fi
+}
+
+stop_tetrablocker() {
+  log "stopping service: tetrablocker"
+  systemctl stop tetrablocker >/dev/null 2>&1 || true
+}
+
+prefix_list() {
+  local IFS=,
+  read -r -a arr <<< "${TP_PREFIXES}"
+  for p in "${arr[@]}"; do
+    p="$(echo -n "$p" | xargs)"
+    [[ -n "$p" ]] || continue
+    echo "$p"
+  done
 }
 
 delete_yaml_files() {
-  if [[ -d "$TP_DIR" ]]; then
-    log "deleting YAML files: ${TP_DIR}/${TP_PREFIX}*.yaml"
-    rm -f "${TP_DIR}/${TP_PREFIX}"*.yaml 2>/dev/null || true
-  else
-    warn "dir not found: $TP_DIR"
+  if [[ ! -d "${TP_DIR}" ]]; then
+    warn "dir not found: ${TP_DIR}"
+    return 0
   fi
+
+  while IFS= read -r pfx; do
+    log "deleting YAML files: ${TP_DIR}/${pfx}*.yaml"
+    rm -f "${TP_DIR}/${pfx}"*.yaml 2>/dev/null || true
+  done < <(prefix_list)
 }
 
 list_tp_policies() {
-  # Parse "tetra tracingpolicy list" output:
-  # ID NAME STATE ...
-  # 1  foo  enabled ...
-  "$TETRA_BIN" tracingpolicy list 2>/dev/null \
-    | awk -v pfx="$TP_PREFIX" '
-        NR==1 {next}
-        $1 ~ /^[0-9]+$/ && $2 ~ ("^" pfx) {print $2}
+  # Expected output: "ID NAME STATE ..."
+  # We keep only NAME for rows where ID is numeric and name starts with any prefix.
+  "${TETRA_BIN}" tracingpolicy list 2>/dev/null \
+    | awk -v prefixes="${TP_PREFIXES}" '
+        BEGIN{
+          n=split(prefixes, a, ",");
+          for(i=1;i<=n;i++){
+            gsub(/^[ \t]+|[ \t]+$/, "", a[i]);
+            if(a[i]!=""){ pfx[a[i]]=1; }
+          }
+        }
+        $1 ~ /^[0-9]+$/ {
+          name=$2;
+          for(k in pfx){
+            if(index(name, k)==1){
+              print name;
+              next;
+            }
+          }
+        }
       '
 }
 
@@ -39,47 +151,49 @@ delete_tp_policies() {
   local names
   names="$(list_tp_policies || true)"
   if [[ -z "${names}" ]]; then
-    log "no tracingpolicies with prefix '${TP_PREFIX}' found"
+    log "no tracingpolicies matched prefixes: ${TP_PREFIXES}"
     return 0
   fi
 
-  log "deleting tracingpolicies with prefix '${TP_PREFIX}' one-by-one"
+  log "deleting tracingpolicies one-by-one"
   while IFS= read -r name; do
-    [[ -n "$name" ]] || continue
-    log "delete tracingpolicy: $name"
-    # Must delete one-by-one; no wildcard support.
-    if ! "$TETRA_BIN" tracingpolicy delete "$name" >/dev/null 2>&1; then
-      # Try alternate subcommand forms (some installs support these).
-      "$TETRA_BIN" tracingpolicy del "$name" >/dev/null 2>&1 || true
-      "$TETRA_BIN" tp delete "$name" >/dev/null 2>&1 || true
-      "$TETRA_BIN" tp del "$name" >/dev/null 2>&1 || true
+    [[ -n "${name}" ]] || continue
+    log "delete tracingpolicy: ${name}"
+    if ! "${TETRA_BIN}" tracingpolicy delete "${name}" >/dev/null 2>&1; then
+      "${TETRA_BIN}" tracingpolicy del "${name}" >/dev/null 2>&1 || true
+      "${TETRA_BIN}" tp delete "${name}" >/dev/null 2>&1 || true
+      "${TETRA_BIN}" tp del "${name}" >/dev/null 2>&1 || true
     fi
-  done <<< "$names"
+  done <<< "${names}"
 }
 
-stop_services() {
-  log "stopping services"
-  systemctl stop tetrablocker >/dev/null 2>&1 || true
-  #systemctl stop tetragon-enterprise >/dev/null 2>&1 || true
-  log "done"
+purge_state_if_requested() {
+  [[ "${PURGE_STATE}" -eq 1 ]] || return 0
+
+  local f="${STATE_DIR}/allowlist_policies.json"
+  log "purging policy state file: ${f}"
+  rm -f "${f}" 2>/dev/null || true
+}
+
+show_status() {
+  log "status (best-effort)"
+  systemctl status tetrablocker --no-pager >/dev/null 2>&1 && systemctl status tetrablocker --no-pager || true
+  systemctl status tetragon-enterprise --no-pager >/dev/null 2>&1 && systemctl status tetragon-enterprise --no-pager || true
 }
 
 main() {
   need_root
+  parse_args "$@"
+  resolve_paths_from_conf
+  check_tetra
 
-  # Quick sanity check that tetra exists
-  if ! command -v "$TETRA_BIN" >/dev/null 2>&1; then
-    echo "[clean-stop] ERROR: tetra binary not found: $TETRA_BIN" >&2
-    exit 1
-  fi
-
-  delete_yaml_files
+  stop_tetrablocker
   delete_tp_policies
-  stop_services
+  delete_yaml_files
+  purge_state_if_requested
+  show_status
 
-  log "status (best-effort)"
-  systemctl status tetrablocker --no-pager >/dev/null 2>&1 && systemctl status tetrablocker --no-pager || true
-  systemctl status tetragon-enterprise --no-pager >/dev/null 2>&1 && systemctl status tetragon-enterprise --no-pager || true
+  log "done"
 }
 
 main "$@"
