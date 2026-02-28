@@ -985,6 +985,16 @@ class TetraBlocker:
         self._refresh_domain_ips()
 
         for proto, call in (("tcp", "tcp_connect"), ("udp", "udp_sendmsg")):
+            stub_cidrs = [c.strip() for c in (self.cfg.allowlist_dns_stub_cidrs or []) if c and str(c).strip()]
+            stub_ports = sorted(set([int(p) for p in (self.cfg.allowlist_dns_stub_ports or []) if int(p) > 0 and int(p) <= 65535]))
+            stub_enabled = bool(self.cfg.allowlist_global_dns_stub_allow) and bool(stub_cidrs) and bool(stub_ports)
+            stub_port_vals: List[str] = []
+            stub_addr_chunks: List[List[str]] = []
+            if stub_enabled:
+                stub_port_vals = compress_ports_to_values(stub_ports, max_values=int(self.cfg.allowlist_port_values_per_selector))
+                av = max(1, int(self.cfg.allowlist_addr_values_per_selector))
+                stub_addr_chunks = chunk_list(sorted(set(stub_cidrs)), av)
+
             groups = self._build_allow_groups(proto)
 
             exact_vals: List[str] = []
@@ -1021,6 +1031,14 @@ class TetraBlocker:
 
             for (bop, bval), destmap in groups.items():
                 allow_selectors_built: List[Tuple[List[str], List[List[str]]]] = []
+
+                # Ensure per-binary policies never kill local DNS stub access
+                if stub_enabled and stub_port_vals and stub_addr_chunks:
+                    max_allow_sel = max(1, int(self.cfg.allowlist_max_allow_selectors_per_policy))
+                    for ch in stub_addr_chunks:
+                        if len(allow_selectors_built) >= max_allow_sel:
+                            break
+                        allow_selectors_built.append((stub_port_vals, [ch]))
 
                 dest_items = []
                 for (doms, cidrs), ports_set in destmap.items():
