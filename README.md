@@ -459,8 +459,7 @@ ls -l /etc/tetragon/tetragon.tp.d/tb-allowlist-*.yaml 2>/dev/null || true
 
 ## Roadmap（可选增强）
 
-- FIM 校验：对 allowlist binary 做哈希/签名校验，防止二进制被替换
-- 更丰富的动作：从 Sigkill 扩展到更温和的 block/deny（按场景选择）
+- FIM 校验：对 allowlist binary 做哈希/签名校验，防止Binary被替换
 - 更强的域名/IP 管理策略：TTL 对齐、IP 变更回收、策略自动拆分与预算提示
-- 统一策略可视化：输出策略摘要、命中统计、审计报告等
+- 统一部署/策略治理：分布式集中部署、输出策略摘要、命中统计、审计报告等
 
