@@ -789,35 +789,37 @@ class TetraBlocker:
             })
         self.allowlist_dirty = True
 
-    def _ensure_trusted_seed_items(self) -> None:
-        if "items" not in self.allowlist_obj or not isinstance(self.allowlist_obj.get("items"), list):
-            self.allowlist_obj["items"] = []
-        changed = False
-        t = now()
+def _ensure_trusted_seed_items(self) -> None:
+    if "items" not in self.allowlist_obj or not isinstance(self.allowlist_obj.get("items"), list):
+        self.allowlist_obj["items"] = []
+    changed = False
+    t = now()
 
-        for b in sorted(self.trusted_binaries):
-            if not b:
-                continue
-            base = os.path.basename(b)
-            if base != "systemd-resolved":
-                continue
+    # Seed ALL trusted binaries (not only systemd-resolved).
+    # Purpose:
+    # 1) Make them appear in allowlist groups so unknown-* policies won't kill them.
+    # 2) They will also be exempted from per-binary deny selector (deny_action=None).
+    for b in sorted(self.trusted_binaries):
+        b = (b or "").strip()
+        if not b:
+            continue
 
-            for proto in ("udp", "tcp"):
-                key = ("In", b, proto, 53)
-                if key not in self.allowlist_items:
-                    self.allowlist_items[key] = ALItem(
-                        binary=b,
-                        binary_operator="In",
-                        proto=proto,
-                        port=53,
-                        domains=["*"],
-                        cidrs=[],
-                        updated_at=t,
-                    )
-                    changed = True
+        for proto in ("udp", "tcp"):
+            key = ("In", b, proto, 53)
+            if key not in self.allowlist_items:
+                self.allowlist_items[key] = ALItem(
+                    binary=b,
+                    binary_operator="In",
+                    proto=proto,
+                    port=53,
+                    domains=["*"],
+                    cidrs=[],
+                    updated_at=t,
+                )
+                changed = True
 
-        if changed:
-            self._rebuild_allowlist_obj_items_from_items()
+    if changed:
+        self._rebuild_allowlist_obj_items_from_items()
 
     def _flush_allowlist_if_needed(self) -> None:
         if not self.allowlist_dirty:
