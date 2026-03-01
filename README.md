@@ -262,7 +262,7 @@ sudo ./install_update_all.sh
 - 创建必要目录（policy_dir/state_dir/allowlist_dir）
 - **如果 allowlist 文件不存在：复制 allowlist-seed.json 作为初始 allowlist**
 - 校验 Python 语法与 JSON 配置
-- systemd reload + enable + start
+- systemd reload + enable + start，保证TetraBlocker在主机重启后也会自动加载运行
 - 打印常用运维命令
 
 ---
