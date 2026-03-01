@@ -1,93 +1,306 @@
 {
-  "version": 1,
-  "learning": {
-    "duration_seconds": 31536000,
-    "started_at": 0,
-    "completed": false,
-    "completed_at": 0
-  },
   "items": [
     {
+      "binary": "/bin/hostname",
       "binary_operator": "In",
-      "binary": "/usr/local/bin/tetra",
-      "proto": "tcp",
-      "port": 54321,
-      "domains": ["127.0.0.1"],
-      "cidrs": ["127.0.0.1/32"],
-      "updated_at": 0.0
-    },
-    {
-      "binary_operator": "In",
-      "binary": "/usr/sbin/chronyd",
-      "proto": "udp",
-      "port": 123,
-      "domains": [],
-      "cidrs": ["169.254.169.123/32"],
-      "updated_at": 0.0
-    },
-    {
-      "binary_operator": "In",
-      "binary": "/usr/lib/systemd/systemd-resolved",
-      "proto": "udp",
+      "cidrs": [
+        "172.31.0.2/32"
+      ],
+      "domains": [
+        "ip-172-31-30-91.ap-southeast-1.compute.internal."
+      ],
       "port": 53,
-      "domains": [],
-      "cidrs": ["172.31.0.2/32"],
-      "updated_at": 0.0
+      "proto": "udp",
+      "updated_at": 1772356871.9595072
     },
     {
-      "binary_operator": "In",
-      "binary": "/usr/lib/systemd/systemd-resolved",
-      "proto": "tcp",
-      "port": 53,
-      "domains": [],
-      "cidrs": ["172.31.0.2/32"],
-      "updated_at": 0.0
-    },
-    {
-      "binary_operator": "In",
       "binary": "/usr/bin/amazon-ssm-agent",
-      "proto": "tcp",
-      "port": 443,
-      "domains": ["ssm.ap-southeast-1.amazonaws.com"],
+      "binary_operator": "In",
       "cidrs": [],
+      "domains": [
+        "*"
+      ],
+      "port": 53,
+      "proto": "tcp",
+      "updated_at": 1772355956.8695931
+    },
+    {
+      "binary": "/usr/bin/amazon-ssm-agent",
+      "binary_operator": "In",
+      "cidrs": [],
+      "domains": [
+        "ssm.ap-southeast-1.amazonaws.com."
+      ],
+      "port": 443,
+      "proto": "tcp",
       "updated_at": 0.0
     },
     {
+      "binary": "/usr/bin/amazon-ssm-agent",
       "binary_operator": "In",
-      "binary": "/usr/bin/ssm-agent-worker",
-      "proto": "tcp",
-      "port": 443,
-      "domains": ["ssm.ap-southeast-1.amazonaws.com"],
       "cidrs": [],
-      "updated_at": 0.0
+      "domains": [
+        "*"
+      ],
+      "port": 53,
+      "proto": "udp",
+      "updated_at": 1772355956.8695931
     },
     {
+      "binary": "/usr/bin/curl",
       "binary_operator": "In",
+      "cidrs": [
+        "169.254.169.254/32",
+        "74.125.68.139/32"
+      ],
+      "domains": [
+        "google.com."
+      ],
+      "port": 80,
+      "proto": "tcp",
+      "updated_at": 1772357030.9193008
+    },
+    {
+      "binary": "/usr/bin/curl",
+      "binary_operator": "In",
+      "cidrs": [
+        "172.31.0.2/32"
+      ],
+      "domains": [
+        "google.com."
+      ],
+      "port": 53,
+      "proto": "udp",
+      "updated_at": 1772355982.3296897
+    },
+    {
       "binary": "/usr/bin/dnf",
-      "proto": "tcp",
-      "port": 443,
-      "domains": ["al2023-repos-ap-southeast-1-de612dc2.s3.dualstack.ap-southeast-1.amazonaws.com"],
+      "binary_operator": "In",
       "cidrs": [],
+      "domains": [
+        "al2023-repos-ap-southeast-1-de612dc2.s3.dualstack.ap-southeast-1.amazonaws.com."
+      ],
+      "port": 443,
+      "proto": "tcp",
       "updated_at": 0.0
     },
     {
-      "binary_operator": "In",
       "binary": "/usr/bin/python3",
-      "proto": "tcp",
-      "port": 443,
-      "domains": ["al2023-repos-ap-southeast-1-de612dc2.s3.dualstack.ap-southeast-1.amazonaws.com"],
+      "binary_operator": "In",
       "cidrs": [],
+      "domains": [
+        "al2023-repos-ap-southeast-1-de612dc2.s3.dualstack.ap-southeast-1.amazonaws.com."
+      ],
+      "port": 443,
+      "proto": "tcp",
       "updated_at": 0.0
     },
     {
+      "binary": "/usr/bin/ssh",
       "binary_operator": "In",
-      "binary": "/usr/libexec/platform-python",
+      "cidrs": [
+        "20.205.243.166/32"
+      ],
+      "domains": [
+        "github.com."
+      ],
+      "port": 22,
       "proto": "tcp",
-      "port": 443,
-      "domains": ["al2023-repos-ap-southeast-1-de612dc2.s3.dualstack.ap-southeast-1.amazonaws.com"],
+      "updated_at": 1772356921.9093225
+    },
+    {
+      "binary": "/usr/bin/ssh",
+      "binary_operator": "In",
+      "cidrs": [
+        "172.31.0.2/32"
+      ],
+      "domains": [
+        "github.com."
+      ],
+      "port": 53,
+      "proto": "udp",
+      "updated_at": 1772356921.8693173
+    },
+    {
+      "binary": "/usr/bin/ssm-agent-worker",
+      "binary_operator": "In",
       "cidrs": [],
+      "domains": [
+        "*"
+      ],
+      "port": 53,
+      "proto": "tcp",
+      "updated_at": 1772355956.8695931
+    },
+    {
+      "binary": "/usr/bin/ssm-agent-worker",
+      "binary_operator": "In",
+      "cidrs": [
+        "169.254.169.254/32"
+      ],
+      "domains": [],
+      "port": 80,
+      "proto": "tcp",
+      "updated_at": 1772356871.7595134
+    },
+    {
+      "binary": "/usr/bin/ssm-agent-worker",
+      "binary_operator": "In",
+      "cidrs": [
+        "47.128.4.174/32",
+        "47.128.8.59/32",
+        "47.128.8.95/32"
+      ],
+      "domains": [
+        "ssm.ap-southeast-1.amazonaws.com."
+      ],
+      "port": 443,
+      "proto": "tcp",
+      "updated_at": 1772356872.2193387
+    },
+    {
+      "binary": "/usr/bin/ssm-agent-worker",
+      "binary_operator": "In",
+      "cidrs": [
+        "172.31.0.2/32"
+      ],
+      "domains": [
+        "*",
+        "ssm.ap-southeast-1.amazonaws.com."
+      ],
+      "port": 53,
+      "proto": "udp",
+      "updated_at": 1772356872.1794782
+    },
+    {
+      "binary": "/usr/lib/systemd/systemd-resolved",
+      "binary_operator": "In",
+      "cidrs": [
+        "172.31.0.2/32"
+      ],
+      "domains": [],
+      "port": 53,
+      "proto": "tcp",
       "updated_at": 0.0
+    },
+    {
+      "binary": "/usr/lib/systemd/systemd-resolved",
+      "binary_operator": "In",
+      "cidrs": [
+        "172.31.0.2/32"
+      ],
+      "domains": [],
+      "port": 53,
+      "proto": "udp",
+      "updated_at": 0.0
+    },
+    {
+      "binary": "/usr/libexec/platform-python",
+      "binary_operator": "In",
+      "cidrs": [],
+      "domains": [
+        "al2023-repos-ap-southeast-1-de612dc2.s3.dualstack.ap-southeast-1.amazonaws.com."
+      ],
+      "port": 443,
+      "proto": "tcp",
+      "updated_at": 0.0
+    },
+    {
+      "binary": "/usr/local/bin/tetra",
+      "binary_operator": "In",
+      "cidrs": [],
+      "domains": [
+        "*"
+      ],
+      "port": 53,
+      "proto": "tcp",
+      "updated_at": 1772355956.8695931
+    },
+    {
+      "binary": "/usr/local/bin/tetra",
+      "binary_operator": "In",
+      "cidrs": [
+        "127.0.0.1/32"
+      ],
+      "domains": [
+        "127.0.0.1."
+      ],
+      "port": 54321,
+      "proto": "tcp",
+      "updated_at": 1772356844.0296881
+    },
+    {
+      "binary": "/usr/local/bin/tetra",
+      "binary_operator": "In",
+      "cidrs": [],
+      "domains": [
+        "*"
+      ],
+      "port": 53,
+      "proto": "udp",
+      "updated_at": 1772355956.8695931
+    },
+    {
+      "binary": "/usr/local/bin/tetragon",
+      "binary_operator": "In",
+      "cidrs": [],
+      "domains": [
+        "*"
+      ],
+      "port": 53,
+      "proto": "tcp",
+      "updated_at": 1772355956.8695931
+    },
+    {
+      "binary": "/usr/local/bin/tetragon",
+      "binary_operator": "In",
+      "cidrs": [],
+      "domains": [
+        "*"
+      ],
+      "port": 53,
+      "proto": "udp",
+      "updated_at": 1772355956.8695931
+    },
+    {
+      "binary": "/usr/sbin/chronyd",
+      "binary_operator": "In",
+      "cidrs": [],
+      "domains": [
+        "*"
+      ],
+      "port": 53,
+      "proto": "tcp",
+      "updated_at": 1772355956.8695931
+    },
+    {
+      "binary": "/usr/sbin/chronyd",
+      "binary_operator": "In",
+      "cidrs": [],
+      "domains": [
+        "*"
+      ],
+      "port": 53,
+      "proto": "udp",
+      "updated_at": 1772355956.8695931
+    },
+    {
+      "binary": "/usr/sbin/chronyd",
+      "binary_operator": "In",
+      "cidrs": [
+        "169.254.169.123/32"
+      ],
+      "domains": [],
+      "port": 123,
+      "proto": "udp",
+      "updated_at": 1772357123.839342
     }
-  ]
+  ],
+  "learning": {
+    "completed": false,
+    "completed_at": 0,
+    "duration_seconds": 300,
+    "started_at": 0
+  },
+  "version": 1
 }
-
