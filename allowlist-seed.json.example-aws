@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "learning": {
+    "duration_seconds": 31536000,
+    "started_at": 0,
+    "completed": false,
+    "completed_at": 0
+  },
+  "items": [
+    {
+      "binary_operator": "In",
+      "binary": "/usr/local/bin/tetra",
+      "proto": "tcp",
+      "port": 54321,
+      "domains": ["127.0.0.1"],
+      "cidrs": ["127.0.0.1/32"],
+      "updated_at": 0.0
+    },
+    {
+      "binary_operator": "In",
+      "binary": "/usr/sbin/chronyd",
+      "proto": "udp",
+      "port": 123,
+      "domains": [],
+      "cidrs": ["169.254.169.123/32"],
+      "updated_at": 0.0
+    },
+    {
+      "binary_operator": "In",
+      "binary": "/usr/lib/systemd/systemd-resolved",
+      "proto": "udp",
+      "port": 53,
+      "domains": [],
+      "cidrs": ["172.31.0.2/32"],
+      "updated_at": 0.0
+    },
+    {
+      "binary_operator": "In",
+      "binary": "/usr/lib/systemd/systemd-resolved",
+      "proto": "tcp",
+      "port": 53,
+      "domains": [],
+      "cidrs": ["172.31.0.2/32"],
+      "updated_at": 0.0
+    },
+    {
+      "binary_operator": "In",
+      "binary": "/usr/bin/amazon-ssm-agent",
+      "proto": "tcp",
+      "port": 443,
+      "domains": ["ssm.ap-southeast-1.amazonaws.com"],
+      "cidrs": [],
+      "updated_at": 0.0
+    },
+    {
+      "binary_operator": "In",
+      "binary": "/usr/bin/ssm-agent-worker",
+      "proto": "tcp",
+      "port": 443,
+      "domains": ["ssm.ap-southeast-1.amazonaws.com"],
+      "cidrs": [],
+      "updated_at": 0.0
+    },
+    {
+      "binary_operator": "In",
+      "binary": "/usr/bin/dnf",
+      "proto": "tcp",
+      "port": 443,
+      "domains": ["al2023-repos-ap-southeast-1-de612dc2.s3.dualstack.ap-southeast-1.amazonaws.com"],
+      "cidrs": [],
+      "updated_at": 0.0
+    },
+    {
+      "binary_operator": "In",
+      "binary": "/usr/bin/python3",
+      "proto": "tcp",
+      "port": 443,
+      "domains": ["al2023-repos-ap-southeast-1-de612dc2.s3.dualstack.ap-southeast-1.amazonaws.com"],
+      "cidrs": [],
+      "updated_at": 0.0
+    },
+    {
+      "binary_operator": "In",
+      "binary": "/usr/libexec/platform-python",
+      "proto": "tcp",
+      "port": 443,
+      "domains": ["al2023-repos-ap-southeast-1-de612dc2.s3.dualstack.ap-southeast-1.amazonaws.com"],
+      "cidrs": [],
+      "updated_at": 0.0
+    }
+  ]
+}
+
