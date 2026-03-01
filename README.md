@@ -490,8 +490,8 @@ sudo systemctl restart tetrablocker
 # List tracing policies
 sudo tetra tracingpolicy list
 
-# Show all tracingpolicies' content
-sudo ./ getpolicy.sh 
+# Show all tracingpolicies content
+sudo ./getpolicy.sh 
 
 # Show allowlist
 cat /etc/tetrablocker/allowlist.json | sed -n '1,200p'
