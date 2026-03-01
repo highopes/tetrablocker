@@ -238,6 +238,8 @@ timeout 10 sudo tetra getevents | jq -c 'select(.process_connect != null)'
 sudo tetra debug dns dump
 ```
 
+**最重要的，是需要先设置好tetrablocker.conf的各项配置以及在开启学习模式之前的初始白名单allowlist-seed.json**
+
 确认以上后就可以使用脚本 **install_update_all.sh** 一键安装/升级（幂等）：
 
 ```bash
