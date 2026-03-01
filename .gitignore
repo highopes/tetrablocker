@@ -1,0 +1,4 @@
+*.bak
+_*.*
+tetrablocker.conf
+allowlist-seed.json
