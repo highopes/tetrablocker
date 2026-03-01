@@ -82,37 +82,6 @@ def run_cmd(cmd: List[str], timeout: int = 30) -> Tuple[int, str, str]:
     return p.returncode, out, err
 
 
-
-# -----------------------------
-# Version helpers
-# -----------------------------
-
-_SEMVER_RE = re.compile(r"(?:^|[^0-9])(\d+)\.(\d+)\.(\d+)(?:[^0-9]|$)")
-
-def parse_semver(text: str) -> Optional[Tuple[int, int, int]]:
-    text = text or ""
-    m = _SEMVER_RE.search(text)
-    if not m:
-        return None
-    try:
-        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
-    except Exception:
-        return None
-
-def tetra_get_semver(cfg) -> Optional[Tuple[int, int, int]]:
-    candidates = [
-        [cfg.tetra_bin] + (cfg.tetra_args or []) + ["version"],
-        [cfg.tetra_bin] + (cfg.tetra_args or []) + ["--version"],
-    ]
-    for cmd in candidates:
-        rc, out, err = run_cmd(cmd, timeout=5)
-        if rc == 0:
-            v = parse_semver((out or "") + "\n" + (err or ""))
-            if v:
-                return v
-    return None
-
-
 # -----------------------------
 # Tetragon / tetra helpers
 # -----------------------------
@@ -199,37 +168,6 @@ def parse_dns_dump(text: str) -> List[Tuple[str, str]]:
         if valid_ip(ip) and dom:
             pairs.append((ip, dom))
     return pairs
-
-
-def parse_getent_ahosts(out: str) -> List[str]:
-    ips: List[str] = []
-    for line in (out or "").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        ip = line.split()[0].strip()
-        if valid_ip(ip):
-            ips.append(ip)
-    seen: Set[str] = set()
-    res: List[str] = []
-    for ip in ips:
-        if ip in seen:
-            continue
-        seen.add(ip)
-        res.append(ip)
-    return res
-
-def resolve_domain_ips_getent(domain: str) -> List[str]:
-    d = (domain or "").strip()
-    if not d:
-        return []
-    if d.endswith("."):
-        d = d[:-1]
-    rc, out, _ = run_cmd(["/usr/bin/getent", "ahosts", d], timeout=10)
-    if rc != 0:
-        return []
-    return parse_getent_ahosts(out)
-
 
 def prewarm_domain(domain: str) -> None:
     d = domain[:-1] if domain.endswith(".") else domain
@@ -614,10 +552,6 @@ class TetraBlocker:
         self.cfg = load_config(cfg_path)
         ensure_dirs(self.cfg)
 
-        self.tetra_semver = tetra_get_semver(self.cfg)
-        self.dns_ip_mode = self._select_dns_ip_mode(self.tetra_semver)
-        self.ip_domain_cache: Dict[str, Dict[str, float]] = {}
-
         self.trusted_binaries: Set[str] = set(self.cfg.allowlist_trusted_binaries or [])
 
         self.cfg_mtime = 0.0
@@ -659,75 +593,7 @@ class TetraBlocker:
     def handle_signal(self, signum, frame):
         self.stop = True
 
-    def _select_dns_ip_mode(self, semver: Optional[Tuple[int, int, int]]) -> str:
-        if semver is None:
-            return "auto"
-        major, minor, patch = semver
-        if major > 1:
-            return "event_ips"
-        if major == 1 and minor >= 18:
-            return "event_ips"
-        return "dns_dump"
-
-    def _dns_event_ips_enabled(self) -> bool:
-        return self.dns_ip_mode in ("event_ips", "event_ips_auto", "auto")
-
-    def _maybe_promote_dns_mode_from_event(self, dns: dict) -> None:
-        if self.dns_ip_mode != "auto":
-            return
-        ips = dns.get("ips", []) or []
-        if isinstance(ips, list) and any(isinstance(x, str) and valid_ip(x) for x in ips):
-            self.dns_ip_mode = "event_ips_auto"
-
-    def _cache_domain_ip(self, dom: str, ip: str, ts: float) -> None:
-        dom = norm_domain(dom)
-        ip = (ip or "").strip()
-        if not dom or not valid_ip(ip):
-            return
-        cidr = ip_to_cidr(ip)
-        self.domain_ip_cache.setdefault(dom, {})[cidr] = ts
-        self.ip_domain_cache.setdefault(cidr, {})[dom] = ts
-
-    def _prune_dns_caches(self, ts: float) -> None:
-        ttl = 900.0
-        max_ips = max(1, int(self.cfg.allowlist_domain_max_ips))
-
-        expire_before = ts - ttl
-        for dom in list(self.domain_ip_cache.keys()):
-            m = self.domain_ip_cache[dom]
-            for cidr in list(m.keys()):
-                if m[cidr] < expire_before:
-                    del m[cidr]
-            if len(m) > max_ips:
-                items = sorted(m.items(), key=lambda kv: kv[1], reverse=True)[:max_ips]
-                self.domain_ip_cache[dom] = dict(items)
-            if not self.domain_ip_cache[dom]:
-                del self.domain_ip_cache[dom]
-
-        for cidr in list(self.ip_domain_cache.keys()):
-            m = self.ip_domain_cache[cidr]
-            for dom in list(m.keys()):
-                if m[dom] < expire_before:
-                    del m[dom]
-            if not m:
-                del self.ip_domain_cache[cidr]
-
-    def _lookup_domains_by_ip(self, ip: str) -> List[str]:
-        ip = (ip or "").strip()
-        if not valid_ip(ip):
-            return []
-        cidr = ip_to_cidr(ip)
-        m = self.ip_domain_cache.get(cidr, {})
-        if not m:
-            return []
-        return sorted(m.keys())
-
-    def _resolve_domain_ips_sync(self, domain: str) -> List[str]:
-        return resolve_domain_ips_getent(domain)
-
     def throttled_dns_dump(self) -> str:
-        if self._dns_event_ips_enabled():
-            raise RuntimeError("dns_dump disabled in dns_event_ips mode")
         t = now()
         min_iv = max(0, int(self.cfg.dns_dump_min_interval_seconds))
         if min_iv == 0:
@@ -1041,16 +907,6 @@ class TetraBlocker:
             for d in it.domains:
                 if d and d != "*":
                     domains.add(d)
-
-        if self._dns_event_ips_enabled():
-            ts = now()
-            for d in sorted(domains):
-                ips = self._resolve_domain_ips_sync(d)
-                for ip in ips:
-                    self._cache_domain_ip(d, ip, ts)
-            self._prune_dns_caches(ts)
-            return
-
         for d in sorted(domains):
             prewarm_domain(d)
 
@@ -1062,10 +918,21 @@ class TetraBlocker:
 
         t = now()
         for ip, dom in pairs:
-            self._cache_domain_ip(dom, ip, t)
+            cidr = ip_to_cidr(ip)
+            m = self.domain_ip_cache.setdefault(dom, {})
+            m[cidr] = t
 
-        self._prune_dns_caches(t)
-
+        ttl = 900.0
+        max_ips = max(1, int(self.cfg.allowlist_domain_max_ips))
+        for dom in list(self.domain_ip_cache.keys()):
+            m = self.domain_ip_cache[dom]
+            expire_before = t - ttl
+            for cidr in list(m.keys()):
+                if m[cidr] < expire_before:
+                    del m[cidr]
+            if len(m) > max_ips:
+                items = sorted(m.items(), key=lambda kv: kv[1], reverse=True)[:max_ips]
+                self.domain_ip_cache[dom] = dict(items)
 
     def _build_allow_groups(self, proto: str) -> Dict[Tuple[str, str], Dict[Tuple[Tuple[str, ...], Tuple[str, ...]], Set[int]]]:
         groups: Dict[Tuple[str, str], Dict[Tuple[Tuple[str, ...], Tuple[str, ...]], Set[int]]] = {}
@@ -1241,19 +1108,13 @@ class TetraBlocker:
         sleep_s = max(0.0, float(self.cfg.dns_retry_sleep_seconds))
 
         for i in range(attempts):
-            t = now()
+            txt = self.throttled_dns_dump()
+            pairs = parse_dns_dump(txt)
 
-            if self._dns_event_ips_enabled():
-                for dom in sorted(domset):
-                    ips = self._resolve_domain_ips_sync(dom)
-                    for ip in ips:
-                        st.ip_cache[ip_to_cidr(ip)] = t
-            else:
-                txt = self.throttled_dns_dump()
-                pairs = parse_dns_dump(txt)
-                for ip, dom in pairs:
-                    if dom in domset:
-                        st.ip_cache[ip_to_cidr(ip)] = t
+            t = now()
+            for ip, dom in pairs:
+                if dom in domset:
+                    st.ip_cache[ip_to_cidr(ip)] = t
 
             expire_before = t - float(rule.ip_ttl_seconds)
             for cidr in list(st.ip_cache.keys()):
@@ -1269,7 +1130,6 @@ class TetraBlocker:
 
             if i < attempts - 1:
                 time.sleep(sleep_s)
-
 
     def apply_rule(self, rule: Rule, force: bool) -> None:
         st = self._ensure_rule_state(rule)
@@ -1370,18 +1230,15 @@ class TetraBlocker:
                     doms.append(nd)
 
         if not doms and valid_ip(dest_ip):
-            if self._dns_event_ips_enabled():
-                doms.extend(self._lookup_domains_by_ip(dest_ip))
-            else:
-                try:
-                    txt = self.throttled_dns_dump()
-                    pairs = parse_dns_dump(txt)
-                    for ip, dom in pairs:
-                        if ip == dest_ip:
-                            doms.append(dom)
-                            break
-                except Exception:
-                    pass
+            try:
+                txt = self.throttled_dns_dump()
+                pairs = parse_dns_dump(txt)
+                for ip, dom in pairs:
+                    if ip == dest_ip:
+                        doms.append(dom)
+                        break
+            except Exception:
+                pass
 
         if self._learning_mode():
             self._allowlist_add_observation(binary=binary, proto=p, port=port, domains=doms, dest_ip=dest_ip)
@@ -1393,47 +1250,22 @@ class TetraBlocker:
         proc = pd.get("process", {}) or {}
         dns = pd.get("dns", {}) or {}
         sock = pd.get("socket", {}) or {}
-
         if not dns.get("response", False):
             return
         if int(dns.get("return_code", 0)) != 0:
             return
-
-        self._maybe_promote_dns_mode_from_event(dns)
-
         binary = str(proc.get("binary", "")).strip()
-
         names = dns.get("names", []) or []
-        doms: List[str] = []
+        doms = []
         for n in names:
             if isinstance(n, str):
                 dn = norm_domain(n)
                 if dn:
                     doms.append(dn)
-
-        ips = dns.get("ips", []) or []
-        if isinstance(ips, list) and doms:
-            ts = now()
-            for ip in ips:
-                if not isinstance(ip, str):
-                    continue
-                ip_s = ip.strip()
-                if not valid_ip(ip_s):
-                    continue
-                for dom in doms:
-                    self._cache_domain_ip(dom, ip_s, ts)
-            if ips:
-                self._prune_dns_caches(ts)
-
         dest_ip = str(sock.get("destination_ip", "")).strip()
-        try:
-            dest_port = int(sock.get("destination_port", 53) or 53)
-        except Exception:
-            dest_port = 53
-
+        dest_port = int(sock.get("destination_port", 53) or 53)
         if self._learning_mode():
             self._allowlist_add_observation(binary=binary, proto="udp", port=dest_port, domains=doms, dest_ip=dest_ip)
-
 
     def run(self):
         signal.signal(signal.SIGINT, self.handle_signal)
