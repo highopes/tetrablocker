@@ -171,11 +171,7 @@
       "binary": "/usr/bin/amazon-ssm-agent",
       "binary_operator": "In",
       "cidrs": [],
-      "domains": [
-        "ssm.*.amazonaws.com.",
-        "ssmmessages.*.amazonaws.com.",
-        "ec2messages.*.amazonaws.com."
-      ],
+      "domains": ["*"],
       "port": 443,
       "proto": "tcp",
       "updated_at": 0.0
@@ -184,12 +180,26 @@
       "binary": "/usr/bin/ssm-agent-worker",
       "binary_operator": "In",
       "cidrs": [],
-      "domains": [
-        "ssm.*.amazonaws.com.",
-        "ssmmessages.*.amazonaws.com.",
-        "ec2messages.*.amazonaws.com."
-      ],
+      "domains": ["*"],
       "port": 443,
+      "proto": "tcp",
+      "updated_at": 0.0
+    },
+    {
+      "binary": "/usr/bin/ssm-session-worker",
+      "binary_operator": "In",
+      "cidrs": [],
+      "domains": ["*"],
+      "port": 443,
+      "proto": "tcp",
+      "updated_at": 0.0
+    },
+    {
+      "binary": "/usr/bin/ssm-session-worker",
+      "binary_operator": "In",
+      "cidrs": ["169.254.169.254/32"],
+      "domains": [],
+      "port": 80,
       "proto": "tcp",
       "updated_at": 0.0
     },

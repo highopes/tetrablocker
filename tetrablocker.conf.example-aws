@@ -1,6 +1,5 @@
 {
   "version": 1,
-  "interval_seconds": 5,
   "policy_dir": "/etc/tetragon/tetragon.tp.d",
   "state_dir": "/var/lib/tetrablocker",
   "tetra_bin": "/usr/local/bin/tetra",
@@ -14,15 +13,19 @@
   "allowlist_learning_seconds": 300,
   "allowlist_action": "Sigkill",
   "allowlist_policy_prefix": "tb-allowlist",
-  "allowlist_max_allow_selectors": 200,
+
+  "allowlist_max_allow_selectors_per_policy": 4,
+
   "allowlist_trusted_binaries": [
     "/usr/lib/systemd/systemd-resolved",
     "/usr/bin/amazon-ssm-agent",
     "/usr/bin/ssm-agent-worker",
+    "/usr/bin/ssm-session-worker",
     "/usr/sbin/chronyd",
     "/usr/local/bin/tetragon",
     "/usr/local/bin/tetra"
   ],
+
   "allowlist_global_dns_stub_allow": true,
   "allowlist_dns_stub_cidrs": [
     "127.0.0.0/8",
@@ -33,13 +36,7 @@
   ],
   "allowlist_domain_refresh_seconds": 30,
 
-  "dns_mode": "auto",
   "dns_dump_min_interval_seconds": 1,
-  "dns_cache_ttl_seconds": 300,
-
-  "enable_policy_cleanup": true,
-  "policy_cleanup_max_age_seconds": 3600,
 
   "rules": []
 }
-
