@@ -275,7 +275,7 @@ sudo ./install_update_all.sh
 
 如需切换到学习状态可按前面说明修改`learning.completed`和`learning.started_at`字段。如需重新开始从零学习，只需除了修改前面字段以外，再删去不想要的白名单部分即可。
 
->注意，只有把`tetrablocker.conf`文件和`allowlist.json`文件置于`/etc/tetrablocker/`目录中才会生效。所以可以直接修改这些目录内的文件，推荐修改当前工作目录的这些文件，然后复制到`/etc/tetrablocker/`，或者直接执行`install_update_all.sh`。
+>注意，只有把`tetrablocker.conf`文件和`allowlist.json`文件置于`/etc/tetrablocker/`目录中才会生效。所以可以直接修改这些目录内的文件，**推荐的做法是`tetrablocker.conf`要修改当前工作目录的这个版本，然后手工复制到`/etc/tetrablocker/`或直接执行`install_update_all.sh`；而`allowlist.json`则直接修改`/etc/tetrablocker/`目录中的文件，因为当前工作目录只保留初始白名单`allowlist-seed...`，而自动脚本`install_update_all.sh`也只有在第一次安装时才会把初始白名单复制到`/etc/tetrablocker/`目录**。
 
 ### 1) tetrablocker.conf 配置项说明(生效文件是/etc/tetrablocker/tetrablocker.conf)
 
