@@ -15,6 +15,7 @@
   "allowlist_policy_prefix": "tb-allowlist",
 
   "allowlist_max_allow_selectors_per_policy": 4,
+  "allowlist_addr_values_per_selector": 4,
 
   "allowlist_trusted_binaries": [
     "/usr/lib/systemd/systemd-resolved",
