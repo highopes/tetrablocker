@@ -1,27 +1,25 @@
 {
-  "tetra_bin": "/usr/local/bin/tetra",
-  "tetra_args": [],
+  "version": 1,
   "policy_dir": "/etc/tetragon/tetragon.tp.d",
   "state_dir": "/var/lib/tetrablocker",
-  "config_reload_seconds": 60,
-  "dns_dump_min_interval_seconds": 1,
+  "tetra_bin": "/usr/local/bin/tetra",
+  "tetra_args": [
+    "--server-address",
+    "127.0.0.1:54321"
+  ],
 
   "allowlist": true,
   "allowlist_file": "/etc/tetrablocker/allowlist.json",
-  "allowlist_learning_seconds": 1800,
-  "allowlist_policy_prefix": "tb-allowlist",
+  "allowlist_learning_seconds": 300,
   "allowlist_action": "Sigkill",
+  "allowlist_policy_prefix": "tb-allowlist",
   "allowlist_reload_seconds": 5,
-
-  "allowlist_addr_values_per_selector": 4,
-  "allowlist_port_values_per_selector": 4,
   "allowlist_max_allow_selectors_per_policy": 4,
-  "allowlist_domain_refresh_seconds": 60,
+  "allowlist_addr_values_per_selector": 32,
+  "allowlist_port_values_per_selector": 32,
   "allowlist_domain_max_ips": 16,
+  "allowlist_domain_refresh_seconds": 30,
 
-  "allowlist_global_dns_stub_allow": true,
-  "allowlist_dns_stub_cidrs": ["127.0.0.0/8"],
-  "allowlist_dns_stub_ports": [53],
   "allowlist_trusted_binaries": [
     "/usr/lib/systemd/systemd-resolved",
     "/lib/systemd/systemd-resolved",
@@ -34,11 +32,9 @@
     "/usr/sbin/runc"
   ],
 
-  "reconcile_on_reload": true,
-  "prewarm_on_start": true,
-  "prewarm_on_reconcile": true,
-  "dns_retry_attempts": 5,
-  "dns_retry_sleep_seconds": 0.2,
+  "allowlist_global_dns_stub_allow": true,
+  "allowlist_dns_stub_cidrs": ["127.0.0.0/8"],
+  "allowlist_dns_stub_ports": [53],
 
   "rules": []
 }

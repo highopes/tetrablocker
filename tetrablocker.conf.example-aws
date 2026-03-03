@@ -13,9 +13,12 @@
   "allowlist_learning_seconds": 300,
   "allowlist_action": "Sigkill",
   "allowlist_policy_prefix": "tb-allowlist",
-
+  "allowlist_reload_seconds": 5,
   "allowlist_max_allow_selectors_per_policy": 4,
-  "allowlist_addr_values_per_selector": 4,
+  "allowlist_addr_values_per_selector": 32,
+  "allowlist_port_values_per_selector": 32,
+  "allowlist_domain_max_ips": 16,
+  "allowlist_domain_refresh_seconds": 30,
 
   "allowlist_trusted_binaries": [
     "/usr/lib/systemd/systemd-resolved",
@@ -35,9 +38,6 @@
   "allowlist_dns_stub_ports": [
     53
   ],
-  "allowlist_domain_refresh_seconds": 30,
-
-  "dns_dump_min_interval_seconds": 1,
 
   "rules": []
 }
