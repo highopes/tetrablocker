@@ -643,6 +643,7 @@ class TetraBlocker:
         self.allowlist_policy_state_path = os.path.join(self.cfg.state_dir, "allowlist_policies.json")
         self.allowlist_policy_state: Dict[str, str] = {}
         self.pending_allowlist_reconcile: bool = True
+        self.allowlist_last_periodic_reconcile: float = 0.0
 
         self.stop = False
 
@@ -995,6 +996,38 @@ class TetraBlocker:
             self._set_learning_flag(started_at=self.allowlist_learning_started_at, completed=True)
             self.pending_allowlist_reconcile = True
 
+    def _allowlist_has_unresolved_domains(self) -> bool:
+        domains: Set[str] = set()
+        for it in self.allowlist_items.values():
+            for d in it.domains:
+                if d and d != "*":
+                    domains.add(d)
+        for d in domains:
+            if not self.domain_ip_cache.get(d, {}):
+                return True
+        return False
+
+    def _maybe_schedule_periodic_allowlist_reconcile(self) -> None:
+        if not self.cfg.allowlist:
+            return
+        if not self.allowlist_learning_completed:
+            return
+
+        base_iv = max(1, int(self.cfg.allowlist_domain_refresh_seconds))
+        iv = base_iv
+
+        # If any allowlist domain has no cached IPs, retry faster to self-heal after boot.
+        if self._allowlist_has_unresolved_domains():
+            iv = min(base_iv, 10)
+
+        if self.pending_allowlist_reconcile:
+            return
+        if now() - self.allowlist_last_periodic_reconcile < iv:
+            return
+
+        self.allowlist_last_periodic_reconcile = now()
+        self.pending_allowlist_reconcile = True
+
     def _allowlist_add_observation(self, binary: str, proto: str, port: int, domains: List[str], dest_ip: str) -> None:
         if not binary or proto not in ("tcp", "udp") or port <= 0:
             return
@@ -1032,7 +1065,15 @@ class TetraBlocker:
     def _refresh_domain_ips(self) -> None:
         if not self.cfg.allowlist:
             return
-        if now() - self.domain_last_refresh < max(1, int(self.cfg.allowlist_domain_refresh_seconds)):
+
+        base_iv = max(1, int(self.cfg.allowlist_domain_refresh_seconds))
+        iv = base_iv
+
+        # If any allowlist domain has no cached IPs, retry faster to self-heal after boot.
+        if self._allowlist_has_unresolved_domains():
+            iv = min(base_iv, 10)
+
+        if now() - self.domain_last_refresh < iv:
             return
         self.domain_last_refresh = now()
 
@@ -1455,6 +1496,7 @@ class TetraBlocker:
                     self.pending_allowlist_reconcile = False
 
             self._flush_allowlist_if_needed()
+            self._maybe_schedule_periodic_allowlist_reconcile()
 
             if self.pending_allowlist_reconcile:
                 try:
